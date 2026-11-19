@@ -25,7 +25,7 @@ cmake --build "$W/tpu" -j "$(nproc)" --target ggml-tpu > "$W/tpu.log" 2>&1 || { 
 mkdir -p "$W/$NAME"
 cp "$W/llama.cpp/build/bin/llama-server" "$W/$NAME/"
 cp -P "$W"/llama.cpp/build/bin/*.so* "$W/$NAME/"
-readelf -d "$W/tpu/libggml-tpu.so" | grep -q 'RUNPATH.*\[\$ORIGIN\]' || { echo "libggml-tpu.so RUNPATH is not \$ORIGIN"; exit 1; }
+readelf -d "$W/tpu/libggml-tpu.so" | grep -q 'RUNPATH.*\[\$ORIGIN[]:]' || { echo "libggml-tpu.so RUNPATH does not start with \$ORIGIN"; exit 1; }
 cp "$W/tpu/libggml-tpu.so" "$W/$NAME/"
 cp "$SRC/ui/chat_ui.py" "$W/$NAME/"
 printf 'ggml-tpu %s\nllama.cpp %s\nbuilt %s on %s\n' "$(git -C "$SRC" rev-parse HEAD)" \
