@@ -126,8 +126,8 @@ PAGE = r"""<!doctype html>
   </main>
   <aside>
     <h3>Settings</h3>
-    <label class="ctl" for="maxTokens">Max tokens: <span id="maxTokensVal">512</span></label>
-    <input type="range" id="maxTokens" min="16" max="2048" step="16" value="512">
+    <label class="ctl" for="maxTokens">Max tokens: <span id="maxTokensVal">2048</span></label>
+    <input type="range" id="maxTokens" min="16" max="4096" step="16" value="2048">
     <label class="ctl" for="temp">Temperature: <span id="tempVal">server default</span></label>
     <input type="range" id="temp" min="-0.1" max="1.5" step="0.1" value="-0.1">
     <label class="ctl" for="topk">Top-k: <span id="topkVal">off</span></label>
@@ -298,6 +298,9 @@ async function submit() {
     else answer.innerHTML = render(reply + `\n\n**Error:** ${err.message}`);
   }
   bubble.classList.remove("cursor");
+  if (!reply && reasoning && finish === "length")
+    answer.innerHTML = render("**No answer:** the reply reached Max tokens while Gemma was still reasoning. " +
+                              "Raise Max tokens, or turn Thinking off, and send it again.");
   const total = (performance.now() - t0) / 1000;
   const n = usage ? usage.completion_tokens : null;
   const rate = n && n > 1 && ttft !== null && total > ttft ? (n - 1) / (total - ttft) : null;
