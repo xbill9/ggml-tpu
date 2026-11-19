@@ -2,7 +2,7 @@
 # On a TPU VM: serve Gemma 4 E2B through llama-server on the ggml-tpu backend (OpenAI-compatible, port 8090).
 # Fetches the exact Q4_0 GGUF on first use and checks it by SHA-256. Run scripts/setup-tpu-vm.sh first.
 # usage: bash ~/ggml-tpu/scripts/serve.sh            (foreground; logs to stdout)
-# env:   DRAFT=1 (speculative decoding), VERIFY=1 (re-hash model and drafter), PORT (8090), CTX (8192), GGML_TPU_EXECUTOR (pjrt), GGML_TPU_QUANT (bf16), GGML_TPU_PRECISION (DEFAULT)
+# env:   GGML_TPU_CACHE_DIR (~/.cache/ggml-tpu/programs), DRAFT=1 (speculative decoding), VERIFY=1 (re-hash model and drafter), PORT (8090), CTX (8192), GGML_TPU_EXECUTOR (pjrt), GGML_TPU_QUANT (bf16), GGML_TPU_PRECISION (DEFAULT)
 set -euo pipefail
 B=~/llama.cpp/build-tpu/bin
 M=~/models/gemma-4-E2B-it-q4_0-exact.gguf
@@ -13,6 +13,9 @@ export GGML_TPU_LIBTPU=${GGML_TPU_LIBTPU:-$HOME/.local/lib/python3.10/site-packa
 export GGML_TPU_PRECISION=${GGML_TPU_PRECISION:-DEFAULT}
 export GGML_TPU_QUANT=${GGML_TPU_QUANT:-bf16}
 export GGML_TPU_VERBOSE=${GGML_TPU_VERBOSE:-1}
+# compiled programs persist here, so a restart loads them instead of compiling (GGML_TPU_CACHE_DIR= to disable)
+export GGML_TPU_CACHE_DIR=${GGML_TPU_CACHE_DIR-$HOME/.cache/ggml-tpu/programs}
+[ -n "$GGML_TPU_CACHE_DIR" ] && mkdir -p "$GGML_TPU_CACHE_DIR"
 
 if [ ! -x $B/llama-server ]; then
     # skip downloading llama-server's prebuilt web UI; the OpenAI endpoint does not need it

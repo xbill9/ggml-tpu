@@ -24,6 +24,7 @@ public:
     virtual Program             compile(const std::string & mlir) = 0;
     virtual std::vector<Handle> execute(Program p, const std::vector<Handle> & args) = 0;
     virtual void                release_program(Program p) = 0;
+    virtual bool                last_compile_cached() { return false; }  // last compile() was loaded from a cache
 };
 
 // Process-wide executor, created on first use. nullptr if no device is available.

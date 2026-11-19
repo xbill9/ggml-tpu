@@ -496,9 +496,9 @@ static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph
                 be->n_compiles++;
                 be->compile_s += cs;
                 if (verbosity() > 0) {
-                    GGML_LOG_INFO("ggml-tpu: compiled program %zu (%d nodes, %zu inputs, %zu outputs, %zu bytes) in %.2f s\n",
-                                  be->n_compiles, ggml_graph_n_nodes(cgraph), L.params.size(), L.outputs.size(),
-                                  it->first.size(), cs);
+                    GGML_LOG_INFO("ggml-tpu: %s program %zu (%d nodes, %zu inputs, %zu outputs, %zu bytes) in %.2f s\n",
+                                  ex->last_compile_cached() ? "loaded cached" : "compiled", be->n_compiles,
+                                  ggml_graph_n_nodes(cgraph), L.params.size(), L.outputs.size(), it->first.size(), cs);
                 }
             }
             C->pe = &it->second;

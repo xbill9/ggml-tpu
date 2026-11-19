@@ -3,18 +3,23 @@
 // Library search: $GGML_TPU_LIBTPU, then $TPU_LIBRARY_PATH, then "libtpu.so" on the loader path.
 // Compile options: the CompileOptionsProto bytes generated at build time (tools/gen_compile_options.py),
 // or the contents of $GGML_TPU_COMPILE_OPTIONS_FILE if set (an empty file sends empty options).
+// Compiled programs are kept in $GGML_TPU_CACHE_DIR if set, keyed by program text, compile options, device
+// kind and plugin version, and loaded from there instead of compiled.
 #include "exec.h"
 
 #include "pjrt_c_api.h"
 
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cinttypes>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -96,6 +101,15 @@ public:
             check(api_->PJRT_DeviceDescription_Kind(&k), "DeviceDescription_Kind");
             kind_.assign(k.device_kind, k.device_kind_size);
         }
+        {
+            auto v = PJRT_ARGS(PJRT_Client_PlatformVersion_Args);
+            v.client = client_;
+            check(api_->PJRT_Client_PlatformVersion(&v), "Client_PlatformVersion");
+            platform_version_.assign(v.platform_version, v.platform_version_size);
+        }
+        if (const char * d = getenv("GGML_TPU_CACHE_DIR")) {
+            if (*d && has(offsetof(PJRT_Api, PJRT_Executable_DeserializeAndLoad))) cache_dir_ = d;
+        }
 
         if (const char * f = getenv("GGML_TPU_COMPILE_OPTIONS_FILE")) {
             std::ifstream in(f, std::ios::binary);
@@ -111,7 +125,7 @@ public:
     std::string description() override {
         return kind_ + " (PJRT " + std::to_string(api_->pjrt_api_version.major_version) + "." +
                std::to_string(api_->pjrt_api_version.minor_version) + " via " + lib_path_ + ", compile options from " +
-               options_src_ + ")";
+               options_src_ + (cache_dir_.empty() ? "" : ", program cache " + cache_dir_) + ")";
     }
 
     void memory(size_t * free, size_t * total) override {
@@ -179,7 +193,25 @@ public:
         check(api_->PJRT_Buffer_Destroy(&a), "Buffer_Destroy");
     }
 
+    bool last_compile_cached() override { return last_cached_; }
+
     Program compile(const std::string & mlir) override {
+        last_cached_ = false;
+        std::string path;
+        if (!cache_dir_.empty()) {
+            path = cache_dir_ + "/" + cache_key(mlir) + ".pjrt";
+            if (PJRT_LoadedExecutable * exe = load_cached(path)) {
+                last_cached_ = true;
+                return finish_program(exe);
+            }
+        }
+        PJRT_LoadedExecutable * exe = compile_now(mlir);
+        if (!path.empty()) store_cached(exe, path);
+        return finish_program(exe);
+    }
+
+private:
+    PJRT_LoadedExecutable * compile_now(const std::string & mlir) {
         auto prog = PJRT_ARGS(PJRT_Program);
         static const char fmt[] = "mlir";
         prog.code = const_cast<char *>(mlir.data());
@@ -193,9 +225,69 @@ public:
         a.compile_options = options_.data();
         a.compile_options_size = options_.size();
         check(api_->PJRT_Client_Compile(&a), "Client_Compile");
+        return a.executable;
+    }
 
+    // 64-bit FNV-1a over everything that decides the compiled program
+    std::string cache_key(const std::string & mlir) const {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const std::string & s) {
+            for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+            h ^= 0xff; h *= 1099511628211ull;
+        };
+        mix(mlir);
+        mix(options_);
+        mix(kind_);
+        mix(platform_version_);
+        char buf[17];
+        snprintf(buf, sizeof(buf), "%016" PRIx64, h);
+        return buf;
+    }
+
+    PJRT_LoadedExecutable * load_cached(const std::string & path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return nullptr;
+        std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto a = PJRT_ARGS(PJRT_Executable_DeserializeAndLoad_Args);
+        a.client = client_;
+        a.serialized_executable = bytes.data();
+        a.serialized_executable_size = bytes.size();
+        PJRT_Error * e = api_->PJRT_Executable_DeserializeAndLoad(&a);
+        if (e) {
+            // stale or foreign entry: compile instead
+            destroy(e);
+            return nullptr;
+        }
+        return a.loaded_executable;
+    }
+
+    void store_cached(PJRT_LoadedExecutable * exe, const std::string & path) {
+        if (!has(offsetof(PJRT_Api, PJRT_Executable_Serialize))) return;
+        auto g = PJRT_ARGS(PJRT_LoadedExecutable_GetExecutable_Args);
+        g.loaded_executable = exe;
+        if (PJRT_Error * e = api_->PJRT_LoadedExecutable_GetExecutable(&g)) { destroy(e); return; }
+        auto s = PJRT_ARGS(PJRT_Executable_Serialize_Args);
+        s.executable = g.executable;
+        PJRT_Error * e = api_->PJRT_Executable_Serialize(&s);
+        if (!e) {
+            const std::string tmp = path + ".tmp" + std::to_string((long) getpid());
+            {
+                std::ofstream out(tmp, std::ios::binary);
+                out.write(s.serialized_bytes, (std::streamsize) s.serialized_bytes_size);
+            }
+            if (rename(tmp.c_str(), path.c_str()) != 0) remove(tmp.c_str());
+            if (s.serialized_executable_deleter) s.serialized_executable_deleter(s.serialized_executable);
+        } else {
+            destroy(e);
+        }
+        auto d = PJRT_ARGS(PJRT_Executable_Destroy_Args);
+        d.executable = g.executable;
+        if (PJRT_Error * de = api_->PJRT_Executable_Destroy(&d)) destroy(de);
+    }
+
+    Program finish_program(PJRT_LoadedExecutable * exe) {
         Prog * p = new Prog();
-        p->exe = a.executable;
+        p->exe = exe;
         try {
             auto g = PJRT_ARGS(PJRT_LoadedExecutable_GetExecutable_Args);
             g.loaded_executable = p->exe;
@@ -216,6 +308,7 @@ public:
         return (Program) p;
     }
 
+public:
     void release_program(Program prog) override {
         Prog * p = (Prog *) prog;
         if (!p) return;
@@ -323,6 +416,9 @@ private:
     std::string       kind_;
     std::string       options_;
     std::string       options_src_;
+    std::string       platform_version_;
+    std::string       cache_dir_;
+    bool              last_cached_ = false;
     const bool        sync_ = [] { const char * s = getenv("GGML_TPU_SYNC"); return s && *s && strcmp(s, "0"); }();
 };
 
