@@ -152,7 +152,7 @@ The `tpu-compare` rows for `int8` were measured with the row-major layout, which
 
 #### Speculative decoding
 
-`scripts/drafter-test.sh` serves Gemma 4 E2B through `llama-server` on the TPU, with and without your exact Q4_0 QAT drafter (`xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf`, SHA-256 `060f5a01…`, `--spec-type draft-mtp --spec-draft-n-max 2`, drafter also on `TPU0`), `bf16` weights, `pjrt`, 256 tokens at temperature 0. The server's own timings, second request for each prompt:
+`scripts/drafter-test.sh` serves Gemma 4 E2B through `llama-server` on the TPU, with and without the exact Q4_0 QAT drafter (`xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf`, SHA-256 `060f5a01…`, `--spec-type draft-mtp --spec-draft-n-max 2`, drafter also on `TPU0`), `bf16` weights, `pjrt`, 256 tokens at temperature 0. The server's own timings, second request for each prompt:
 
 | Prompt | Without drafter | With drafter | Drafted tokens accepted |
 | --- | --- | --- | --- |
