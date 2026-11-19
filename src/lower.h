@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tpu {
@@ -30,7 +31,8 @@ struct Lowered {
     std::vector<const ggml_tensor *> dropped;  // roots computed here but not returned (contents undefined after)
 };
 
-// materialize_all: return every root computed in the graph, not only sinks / outputs / in-place writes
-Lowered lower_graph(const ggml_cgraph * g, bool materialize_all);
+// materialize_all: return every root computed in the graph, not only sinks / outputs / in-place writes.
+// keep: tensors another backend reads after this graph (inputs of ops this backend rejects); their roots are returned too.
+Lowered lower_graph(const ggml_cgraph * g, bool materialize_all, const std::unordered_set<const ggml_tensor *> & keep);
 
 } // namespace tpu

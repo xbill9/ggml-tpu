@@ -274,7 +274,7 @@ struct Dim {
 
 class Lowerer {
 public:
-    explicit Lowerer(bool mat_all) : mat_all_(mat_all) {
+    Lowerer(bool mat_all, const std::unordered_set<const ggml_tensor *> & keep) : mat_all_(mat_all), keep_(keep) {
         const char * p = getenv("GGML_TPU_PRECISION");
         prec_ = p ? p : "HIGHEST";
     }
@@ -284,10 +284,14 @@ public:
 private:
     hlo::Builder b_;
     bool         mat_all_;
+    const std::unordered_set<const ggml_tensor *> & keep_;
     std::string  prec_;
 
     std::unordered_map<const ggml_tensor *, V> nodeval_;
     std::unordered_map<const ggml_tensor *, V> rootval_;
+    // a node's value is current while its root has not been written since (in-place ops write roots)
+    std::unordered_map<const ggml_tensor *, int> nodever_;
+    std::unordered_map<const ggml_tensor *, int> rootver_;
     std::vector<const ggml_tensor *>           params_;
     std::vector<const ggml_tensor *>           written_;
     std::vector<const ggml_tensor *>           computed_;
@@ -362,7 +366,7 @@ private:
 
     V value(const ggml_tensor * t) {
         auto it = nodeval_.find(t);
-        if (it != nodeval_.end()) return it->second;
+        if (it != nodeval_.end() && nodever_[t] == rootver_[root_of(t)]) return it->second;
         if (t->view_src) return read_layout(rootvalue(t->view_src), t->view_src, t);
         return rootvalue(t);
     }
@@ -1046,14 +1050,25 @@ Lowered Lowerer::run(const ggml_cgraph * g) {
         V v = b_.convert(compute(X), et_of(X->type));
         v = b_.reshape(v, shape4(X));
         nodeval_[X] = v;
+        const ggml_tensor * R = root_of(X);
         if (X->view_src) {
-            const ggml_tensor * R = X->view_src;
-            rootval_[R] = write_layout(rootvalue(R), R, X, v);
+            const bool whole = X->view_offs == 0 && ggml_nelements(X) == ggml_nelements(R) && ggml_is_contiguous(X) &&
+                               X->type == R->type && is_plain(R->type);
+            if (whole && !rootval_.count(R)) {
+                // overwrites all of R: its old contents are not needed, so R is not a program input
+                Shape sh;
+                std::string et;
+                root_array_desc(R, 0, sh, et);
+                rootval_[R] = b_.reshape(v, sh);
+            } else {
+                rootval_[R] = write_layout(rootvalue(R), R, X, v);
+            }
             if (written_set_.insert(R).second) written_.push_back(R);
         } else {
             rootval_[X] = v;
             if (computed_set_.insert(X).second) computed_.push_back(X);
         }
+        nodever_[X] = ++rootver_[R];
     }
 
     Lowered out;
@@ -1064,7 +1079,9 @@ Lowered Lowerer::run(const ggml_cgraph * g) {
     };
     for (auto * R : written_) add_out(R);
     for (const ggml_tensor * X : nodes) {
-        if (!used.count(X) || (X->flags & GGML_TENSOR_FLAG_OUTPUT) || mat_all_) add_out(root_of(X));
+        if (!used.count(X) || (X->flags & GGML_TENSOR_FLAG_OUTPUT) || mat_all_ || keep_.count(X) || keep_.count(root_of(X))) {
+            add_out(root_of(X));
+        }
     }
     for (auto * R : computed_) if (!out_set.count(R)) out.dropped.push_back(R);
 
@@ -1077,8 +1094,8 @@ Lowered Lowerer::run(const ggml_cgraph * g) {
 
 } // namespace
 
-Lowered lower_graph(const ggml_cgraph * g, bool materialize_all) {
-    Lowerer l(materialize_all);
+Lowered lower_graph(const ggml_cgraph * g, bool materialize_all, const std::unordered_set<const ggml_tensor *> & keep) {
+    Lowerer l(materialize_all, keep);
     return l.run(g);
 }
 

@@ -73,7 +73,6 @@ public:
             if (*lib && !dlopen(lib, RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD) && !dlopen(lib, RTLD_NOW | RTLD_GLOBAL)) {
                 throw std::runtime_error(std::string("ggml-tpu: cannot load ") + lib);
             }
-            dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
             PyConfig cfg;
             PyConfig_InitPythonConfig(&cfg);
             const char * home = getenv("GGML_TPU_PYTHON_HOME");
@@ -91,7 +90,9 @@ public:
         PyObject * r = PyRun_String(k_helper, Py_file_input, dict, dict);
         if (!r) {
             PyErr_Print();
+            Py_CLEAR(mod_);
             PyGILState_Release(g);
+            if (owns_) save_ = PyEval_SaveThread();  // release the GIL the initializing thread holds
             throw std::runtime_error("ggml-tpu: failed to load the JAX helper (is jax installed for this Python?)");
         }
         Py_DECREF(r);
@@ -167,6 +168,12 @@ public:
         }
         Py_DECREF(r);
         return out;
+    }
+
+    void release_program(Program p) override {
+        if (!p) return;
+        Gil g;
+        Py_DECREF((PyObject *) p);
     }
 
 private:

@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tpu {
@@ -30,7 +31,7 @@ static bool env_flag(const char * name) {
 }
 
 static int verbosity() {
-    static int v = getenv("GGML_TPU_VERBOSE") ? atoi(getenv("GGML_TPU_VERBOSE")) : 0;
+    static int v = [] { const char * e = getenv("GGML_TPU_VERBOSE"); return e ? atoi(e) : 0; }();
     return v;
 }
 
@@ -87,9 +88,16 @@ struct Buffer {
     size_t                         size = 0;
     std::map<size_t, Entry>        entries;   // by offset, non-overlapping
     std::map<size_t, size_t>       poisoned;  // offset -> size: computed on device, never materialized
+    std::mutex                     mu;        // two contexts may share a weights buffer from different threads
 
     ~Buffer() {
-        for (auto & kv : entries) kv.second.release();
+        for (auto & kv : entries) {
+            try {
+                kv.second.release();
+            } catch (const std::exception & e) {
+                GGML_LOG_ERROR("ggml-tpu: %s\n", e.what());
+            }
+        }
         free(host);
     }
 
@@ -122,11 +130,20 @@ struct Buffer {
         });
     }
 
+    // remove [off, off+size) from the poisoned ranges, keeping the parts outside it
     void unpoison(size_t off, size_t size) {
+        std::vector<std::pair<size_t, size_t>> keep;
         for (auto it = poisoned.begin(); it != poisoned.end();) {
-            if (it->first < off + size && it->first + it->second > off) it = poisoned.erase(it);
-            else ++it;
+            const size_t a = it->first, e = it->first + it->second;
+            if (a < off + size && e > off) {
+                if (a < off) keep.emplace_back(a, off - a);
+                if (e > off + size) keep.emplace_back(off + size, e - (off + size));
+                it = poisoned.erase(it);
+            } else {
+                ++it;
+            }
         }
+        for (auto & k : keep) poisoned[k.first] = k.second;
     }
 
     const char * poisoned_at(size_t off, size_t size) const {
@@ -158,8 +175,8 @@ struct Buffer {
             return;
         }
         if (poisoned_at(off, size)) {
-            GGML_ABORT("ggml-tpu: tensor '%s' was computed on the device but not kept; rerun with "
-                       "GGML_TPU_MATERIALIZE_ALL=1", R->name);
+            throw std::runtime_error(std::string("tensor '") + R->name +
+                                     "' was computed on the device but not kept; rerun with GGML_TPU_MATERIALIZE_ALL=1");
         }
         sync_to_host(off, size);
         drop(off, size);
@@ -189,7 +206,7 @@ struct Buffer {
         std::vector<int64_t> sh;
         std::string et;
         root_array_desc(R, 0, sh, et);
-        GGML_ASSERT(root_array_parts(R) == 1);
+        if (root_array_parts(R) != 1) throw std::runtime_error(std::string("multi-array output ") + R->name);
         drop(off, size);
         unpoison(off, size);
         entries[off] = Entry{size, et, sh, h, {}, true};
@@ -210,34 +227,44 @@ struct Buffer {
 static void buf_free(ggml_backend_buffer_t buffer) { delete (Buffer *) buffer->context; }
 static void * buf_base(ggml_backend_buffer_t buffer) { return ((Buffer *) buffer->context)->host; }
 
+// The buffer callbacks return void, so a device error here can only abort; it does so with the message.
+template <typename F> static void guarded(const char * what, const ggml_tensor * t, F && f) {
+    try {
+        f();
+    } catch (const std::exception & e) {
+        GGML_ABORT("ggml-tpu: %s of tensor '%s' failed: %s", what, t ? t->name : "", e.what());
+    }
+}
+
 static void buf_memset_tensor(ggml_backend_buffer_t buffer, ggml_tensor * t, uint8_t value, size_t offset, size_t size) {
     Buffer * b = (Buffer *) buffer->context;
     const size_t off = (uint8_t *) t->data - b->host + offset;
-    b->host_write(off, size);
-    memset(b->host + off, value, size);
+    std::lock_guard<std::mutex> lk(b->mu);
+    guarded("memset", t, [&] { b->host_write(off, size); memset(b->host + off, value, size); });
 }
 
 static void buf_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * t, const void * data, size_t offset, size_t size) {
     Buffer * b = (Buffer *) buffer->context;
     const size_t off = (uint8_t *) t->data - b->host + offset;
-    b->host_write(off, size);
-    memcpy(b->host + off, data, size);
+    std::lock_guard<std::mutex> lk(b->mu);
+    guarded("write", t, [&] { b->host_write(off, size); memcpy(b->host + off, data, size); });
 }
 
 static void buf_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * t, void * data, size_t offset, size_t size) {
     Buffer * b = (Buffer *) buffer->context;
     const size_t off = (uint8_t *) t->data - b->host + offset;
+    std::lock_guard<std::mutex> lk(b->mu);
     if (b->poisoned_at(off, size)) {
         GGML_ABORT("ggml-tpu: read of tensor '%s' (%s) that was computed on the device but not kept; rerun with "
                    "GGML_TPU_MATERIALIZE_ALL=1", t->name, ggml_op_desc(t));
     }
-    b->sync_to_host(off, size);
-    memcpy(data, b->host + off, size);
+    guarded("read", t, [&] { b->sync_to_host(off, size); memcpy(data, b->host + off, size); });
 }
 
 static void buf_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     Buffer * b = (Buffer *) buffer->context;
-    for (auto & kv : b->entries) kv.second.release();
+    std::lock_guard<std::mutex> lk(b->mu);
+    guarded("clear", nullptr, [&] { for (auto & kv : b->entries) kv.second.release(); });
     b->entries.clear();
     b->poisoned.clear();
     memset(b->host, value, b->size);
@@ -299,6 +326,23 @@ static ggml_backend_buffer_type_t buffer_type() {
 // ---------------------------------------------------------------------------------------------
 // backend (stream)
 
+// Inputs of ops this backend rejected. ggml_backend_sched runs those ops on another backend and reads
+// their inputs from here after graph_compute, so the lowering must return them instead of dropping them.
+// The scheduler asks supports_op about every node before it splits a graph, so the set is filled in time.
+static std::mutex                              keep_mu;
+static std::unordered_set<const ggml_tensor *> keep_set;
+
+static void keep_inputs_of(const ggml_tensor * op) {
+    std::lock_guard<std::mutex> lk(keep_mu);
+    if (keep_set.size() > (1u << 16)) keep_set.clear();  // stale addresses from old graphs
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        const ggml_tensor * s = op->src[i];
+        if (!s) continue;
+        keep_set.insert(s);
+        if (s->view_src) keep_set.insert(s->view_src);
+    }
+}
+
 // Everything the lowering reads from a graph, so equal fingerprints lower to the same program
 // with the same parameter and output tensors.
 static void fp_tensor(std::string & k, const ggml_tensor * t) {
@@ -317,7 +361,7 @@ static void fp_tensor(std::string & k, const ggml_tensor * t) {
     for (int i = 0; i < GGML_MAX_SRC; i++) put(&t->src[i], sizeof(t->src[i]));
 }
 
-static std::string fingerprint(const ggml_cgraph * g, bool mat_all) {
+static std::string fingerprint(const ggml_cgraph * g, bool mat_all, const std::unordered_set<const ggml_tensor *> & keep) {
     std::string k;
     k.reserve(1 << 18);
     k.push_back(mat_all ? 1 : 0);
@@ -326,21 +370,31 @@ static std::string fingerprint(const ggml_cgraph * g, bool mat_all) {
         const ggml_tensor * t = ggml_graph_node(const_cast<ggml_cgraph *>(g), i);
         fp_tensor(k, t);
         for (int s = 0; s < GGML_MAX_SRC; s++) {
-            if (t->src[s]) fp_tensor(k, t->src[s]);
+            if (!t->src[s]) continue;
+            fp_tensor(k, t->src[s]);
+            if (t->src[s]->view_src) fp_tensor(k, t->src[s]->view_src);
         }
         if (t->view_src) fp_tensor(k, t->view_src);
+        k.push_back(keep.count(t) || keep.count(t->view_src ? t->view_src : t) ? 1 : 0);
     }
     return k;
 }
 
+struct ProgEntry {
+    Program  p;
+    uint64_t last_use;
+};
+
 struct Compiled {
-    Lowered L;
-    Program p;
+    Lowered     L;      // L.mlir is cleared once the program is in Backend::programs
+    ProgEntry * pe;     // nullptr until compiled
 };
 
 struct Backend {
     std::unordered_map<std::string, std::shared_ptr<Compiled>> by_graph;  // graph fingerprint -> program
-    std::unordered_map<std::string, Program> programs;
+    std::unordered_map<std::string, ProgEntry> programs;                   // program text -> compiled program
+    uint64_t tick = 0;
+    size_t   max_programs = [] { const char * v = getenv("GGML_TPU_MAX_PROGRAMS"); return (size_t) (v ? atoll(v) : 64); }();
     size_t n_compiles = 0;
     double compile_s = 0;
     // per-phase wall time, seconds
@@ -349,6 +403,22 @@ struct Backend {
 };
 
 static const char * be_name(ggml_backend_t) { return "TPU"; }
+
+// free the least recently used program and every graph that maps to it
+static void evict_one(Backend * be) {
+    auto victim = be->programs.end();
+    for (auto it = be->programs.begin(); it != be->programs.end(); ++it) {
+        if (victim == be->programs.end() || it->second.last_use < victim->second.last_use) victim = it;
+    }
+    if (victim == be->programs.end()) return;
+    ProgEntry * pe = &victim->second;
+    for (auto it = be->by_graph.begin(); it != be->by_graph.end();) {
+        if (it->second->pe == pe) it = be->by_graph.erase(it);
+        else ++it;
+    }
+    executor()->release_program(pe->p);
+    be->programs.erase(victim);
+}
 
 static void be_free(ggml_backend_t backend) {
     Backend * be = (Backend *) backend->context;
@@ -359,6 +429,11 @@ static void be_free(ggml_backend_t backend) {
             GGML_LOG_INFO("ggml-tpu: %zu runs, ms per run: lower %.2f, program lookup %.2f, inputs %.2f, execute %.2f, outputs %.2f\n",
                           be->n_runs, be->t_lower * k, be->t_lookup * k, be->t_args * k, be->t_exec * k, be->t_out * k);
         }
+    }
+    try {
+        for (auto & kv : be->programs) executor()->release_program(kv.second.p);
+    } catch (const std::exception & e) {
+        GGML_LOG_ERROR("ggml-tpu: %s\n", e.what());
     }
     delete be;
     delete backend;
@@ -381,15 +456,19 @@ static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph
     try {
         auto t0 = clk::now();
         const bool mat_all = env_flag("GGML_TPU_MATERIALIZE_ALL");
-        std::string key = fingerprint(cgraph, mat_all);
         std::shared_ptr<Compiled> C;
-        auto git = be->by_graph.find(key);
-        if (git != be->by_graph.end()) {
-            C = git->second;
-        } else {
-            C = std::make_shared<Compiled>();
-            C->L = lower_graph(cgraph, mat_all);
-            C->p = nullptr;
+        std::string key;
+        {
+            std::lock_guard<std::mutex> lk(keep_mu);
+            key = fingerprint(cgraph, mat_all, keep_set);
+            auto git = be->by_graph.find(key);
+            if (git != be->by_graph.end()) {
+                C = git->second;
+            } else {
+                C = std::make_shared<Compiled>();
+                C->L = lower_graph(cgraph, mat_all, keep_set);
+                C->pe = nullptr;
+            }
         }
         const Lowered & L = C->L;
         if (L.outputs.empty()) {
@@ -398,50 +477,68 @@ static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph
         }
         auto t1 = clk::now();
 
-        if (!C->p) {
+        if (!C->pe) {
             auto it = be->programs.find(L.mlir);
-            if (it != be->programs.end()) {
-                C->p = it->second;
-            } else {
+            if (it == be->programs.end()) {
                 if (verbosity() > 1) dump(L.mlir, "graph");
                 auto c0 = std::chrono::steady_clock::now();
+                Program prog;
                 try {
-                    C->p = ex->compile(L.mlir);
+                    prog = ex->compile(L.mlir);
                 } catch (...) {
                     if (verbosity() <= 1 && getenv("GGML_TPU_DUMP_DIR")) dump(L.mlir, "failed");
                     throw;
                 }
                 const double cs = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
-                be->programs.emplace(L.mlir, C->p);
+                while (be->max_programs > 0 && be->programs.size() >= be->max_programs) evict_one(be);
+                it = be->programs.emplace(L.mlir, ProgEntry{prog, 0}).first;
                 be->n_compiles++;
                 be->compile_s += cs;
                 if (verbosity() > 0) {
                     GGML_LOG_INFO("ggml-tpu: compiled program %zu (%d nodes, %zu inputs, %zu outputs, %zu bytes) in %.2f s\n",
                                   be->n_compiles, ggml_graph_n_nodes(cgraph), L.params.size(), L.outputs.size(),
-                                  L.mlir.size(), cs);
+                                  it->first.size(), cs);
                 }
             }
+            C->pe = &it->second;
+            C->L.mlir.clear();
+            C->L.mlir.shrink_to_fit();
             be->by_graph.emplace(std::move(key), C);
         }
-        Program p = C->p;
+        C->pe->last_use = ++be->tick;
+        Program p = C->pe->p;
         auto t2 = clk::now();
         std::vector<Handle> args;
         args.reserve(L.params.size());
         for (const ggml_tensor * R : L.params) {
-            GGML_ASSERT(R->buffer && R->buffer->buft == buffer_type());
-            ((Buffer *) R->buffer->context)->arrays_for(R, args);
+            if (!R->buffer || R->buffer->buft != buffer_type()) {
+                throw std::runtime_error(std::string("input '") + R->name + "' is not in a TPU buffer");
+            }
+            Buffer * b = (Buffer *) R->buffer->context;
+            std::lock_guard<std::mutex> lk(b->mu);
+            b->arrays_for(R, args);
         }
         auto t3 = clk::now();
         std::vector<Handle> outs = ex->execute(p, args);
-        GGML_ASSERT(outs.size() == L.outputs.size());
+        if (outs.size() != L.outputs.size()) {
+            for (Handle h : outs) ex->release(h);
+            throw std::runtime_error("program returned " + std::to_string(outs.size()) + " outputs, expected " +
+                                     std::to_string(L.outputs.size()));
+        }
         auto t4 = clk::now();
         // dropped intermediates may share memory with outputs: poison first, then let outputs win
         for (const ggml_tensor * R : L.dropped) {
-            if (R->buffer && R->buffer->buft == buffer_type()) ((Buffer *) R->buffer->context)->poison(R);
+            if (R->buffer && R->buffer->buft == buffer_type()) {
+                Buffer * b = (Buffer *) R->buffer->context;
+                std::lock_guard<std::mutex> lk(b->mu);
+                b->poison(R);
+            }
         }
         for (size_t i = 0; i < outs.size(); i++) {
             const ggml_tensor * R = L.outputs[i];
-            ((Buffer *) R->buffer->context)->set_output(R, outs[i]);
+            Buffer * b = (Buffer *) R->buffer->context;
+            std::lock_guard<std::mutex> lk(b->mu);
+            b->set_output(R, outs[i]);
         }
         auto t5 = clk::now();
         be->t_lower += secs(t0, t1);
@@ -531,6 +628,7 @@ static ggml_backend_buffer_type_t dev_buffer_type(ggml_backend_dev_t) { return b
 
 static bool dev_supports_op(ggml_backend_dev_t, const ggml_tensor * op) {
     const bool ok = supports_op(op);
+    if (!ok) keep_inputs_of(op);
     if (!ok && verbosity() > 0) {
         static std::mutex mu;
         static std::unordered_map<std::string, int> seen;

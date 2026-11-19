@@ -64,3 +64,9 @@ add_executable(tpu-compare tools/compare.cpp)
 target_include_directories(tpu-compare PRIVATE "${LLAMA_CPP_DIR}/include" "${LLAMA_CPP_DIR}/ggml/include")
 target_link_libraries(tpu-compare PRIVATE "${LLAMA_LIB}" "${GGML_LIB}" "${GGML_BASE_LIB}")
 set_target_properties(tpu-compare PROPERTIES BUILD_RPATH "${LLAMA_CPP_BUILD}/bin")
+
+# tpu-regress: graph patterns that broke the backend, CPU vs TPU through ggml_backend_sched
+add_executable(tpu-regress tools/regress.cpp)
+target_include_directories(tpu-regress PRIVATE "${LLAMA_CPP_DIR}/ggml/include")
+target_link_libraries(tpu-regress PRIVATE "${GGML_LIB}" "${GGML_BASE_LIB}")
+set_target_properties(tpu-regress PROPERTIES BUILD_RPATH "${LLAMA_CPP_BUILD}/bin")

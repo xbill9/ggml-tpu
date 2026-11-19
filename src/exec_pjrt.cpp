@@ -9,6 +9,7 @@
 
 #include <dlfcn.h>
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,7 +64,14 @@ public:
                                      " in " + lib_path_ + ", header has " + std::to_string(PJRT_API_MAJOR));
         }
 
-        if (api_->PJRT_Plugin_Initialize) {
+        // the plugin's function table may predate this header (tested: libtpu 0.0.17, PJRT 0.69); fields past
+        // api_->struct_size do not exist in it
+        require(offsetof(PJRT_Api, PJRT_Executable_NumOutputs), "Executable_NumOutputs");
+        require(offsetof(PJRT_Api, PJRT_Client_Compile), "Client_Compile");
+        require(offsetof(PJRT_Api, PJRT_Buffer_ToHostBuffer), "Buffer_ToHostBuffer");
+        require(offsetof(PJRT_Api, PJRT_LoadedExecutable_Execute), "LoadedExecutable_Execute");
+
+        if (has(offsetof(PJRT_Api, PJRT_Plugin_Initialize)) && api_->PJRT_Plugin_Initialize) {
             auto a = PJRT_ARGS(PJRT_Plugin_Initialize_Args);
             check(api_->PJRT_Plugin_Initialize(&a), "Plugin_Initialize");
         }
@@ -108,7 +116,7 @@ public:
 
     void memory(size_t * free, size_t * total) override {
         *free = *total = 0;
-        if (!api_->PJRT_Device_MemoryStats) return;
+        if (!has(offsetof(PJRT_Api, PJRT_Device_MemoryStats)) || !api_->PJRT_Device_MemoryStats) return;
         auto a = PJRT_ARGS(PJRT_Device_MemoryStats_Args);
         a.device = device_;
         PJRT_Error * e = api_->PJRT_Device_MemoryStats(&a);
@@ -184,17 +192,38 @@ public:
 
         Prog * p = new Prog();
         p->exe = a.executable;
-        auto g = PJRT_ARGS(PJRT_LoadedExecutable_GetExecutable_Args);
-        g.loaded_executable = p->exe;
-        check(api_->PJRT_LoadedExecutable_GetExecutable(&g), "LoadedExecutable_GetExecutable");
-        auto n = PJRT_ARGS(PJRT_Executable_NumOutputs_Args);
-        n.executable = g.executable;
-        check(api_->PJRT_Executable_NumOutputs(&n), "Executable_NumOutputs");
-        p->n_out = n.num_outputs;
-        auto d = PJRT_ARGS(PJRT_Executable_Destroy_Args);
-        d.executable = g.executable;
-        check(api_->PJRT_Executable_Destroy(&d), "Executable_Destroy");
+        try {
+            auto g = PJRT_ARGS(PJRT_LoadedExecutable_GetExecutable_Args);
+            g.loaded_executable = p->exe;
+            check(api_->PJRT_LoadedExecutable_GetExecutable(&g), "LoadedExecutable_GetExecutable");
+            auto n = PJRT_ARGS(PJRT_Executable_NumOutputs_Args);
+            n.executable = g.executable;
+            PJRT_Error * e = api_->PJRT_Executable_NumOutputs(&n);
+            auto d = PJRT_ARGS(PJRT_Executable_Destroy_Args);
+            d.executable = g.executable;
+            PJRT_Error * de = api_->PJRT_Executable_Destroy(&d);
+            check(e, "Executable_NumOutputs");
+            check(de, "Executable_Destroy");
+            p->n_out = n.num_outputs;
+        } catch (...) {
+            release_program((Program) p);
+            throw;
+        }
         return (Program) p;
+    }
+
+    void release_program(Program prog) override {
+        Prog * p = (Prog *) prog;
+        if (!p) return;
+        if (p->exe) {
+            auto d = PJRT_ARGS(PJRT_LoadedExecutable_Destroy_Args);
+            d.executable = p->exe;
+            PJRT_Error * e = api_->PJRT_LoadedExecutable_Destroy(&d);
+            delete p;
+            check(e, "LoadedExecutable_Destroy");
+            return;
+        }
+        delete p;
     }
 
     std::vector<Handle> execute(Program prog, const std::vector<Handle> & in) override {
@@ -234,6 +263,14 @@ private:
         if (et == "i8") return PJRT_Buffer_Type_S8;
         if (et == "ui8") return PJRT_Buffer_Type_U8;
         throw std::runtime_error("ggml-tpu: no PJRT buffer type for " + et);
+    }
+
+    bool has(size_t field_offset) const { return field_offset + sizeof(void *) <= api_->struct_size; }
+
+    void require(size_t field_offset, const char * name) const {
+        if (!has(field_offset)) {
+            throw std::runtime_error(std::string("ggml-tpu: PJRT plugin ") + lib_path_ + " has no PJRT_" + name);
+        }
     }
 
     void destroy(PJRT_Error * e) {
