@@ -1,0 +1,14 @@
+# Conservative bug-finding checks only; style is matched by hand (see CLAUDE.md).
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  clang-analyzer-*,
+  -clang-analyzer-optin.*,
+  -clang-analyzer-security.insecureAPI.*,
+  performance-*,
+  -performance-enum-size
+HeaderFilterRegex: '^.*/ggml-tpu/(src|tools)/.*'
+WarningsAsErrors: ''
