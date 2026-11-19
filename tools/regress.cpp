@@ -14,22 +14,27 @@
 
 struct Built {
     std::vector<ggml_tensor *> inputs;
-    ggml_tensor *              out;
+    ggml_tensor *              out = nullptr;
+    ggml_context *             cpu_ctx = nullptr;  // inputs created here live in a CPU buffer
 };
 
 struct Case {
     const char *                                            name;
-    std::function<Built(ggml_context *, ggml_context *, ggml_cgraph *)> build;  // (inputs ctx, ops ctx, graph)
+    std::function<void(Built &, ggml_context *, ggml_context *, ggml_cgraph *)> build;  // (result, inputs ctx, ops ctx, graph)
 };
 
 static std::vector<float> run(const Case & c, std::vector<ggml_backend_t> backends, int reps, bool & ok) {
     // inputs live in a buffer of the first backend, as weights do in llama.cpp, so the scheduler runs their users there
     ggml_init_params ip = {ggml_tensor_overhead() * 256 + ggml_graph_overhead(), nullptr, true};
     ggml_context * ctx_in = ggml_init(ip);
+    ggml_context * ctx_cpu = ggml_init(ip);
     ggml_context * ctx = ggml_init(ip);
     ggml_cgraph * gf = ggml_new_graph(ctx);
-    Built b = c.build(ctx_in, ctx, gf);
+    Built b;
+    b.cpu_ctx = ctx_cpu;
+    c.build(b, ctx_in, ctx, gf);
     ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx_in, backends[0]);
+    ggml_backend_buffer_t buf_cpu = ggml_get_first_tensor(ctx_cpu) ? ggml_backend_alloc_ctx_tensors(ctx_cpu, backends.back()) : nullptr;
     ggml_set_output(b.out);
     ggml_build_forward_expand(gf, b.out);
     ggml_backend_sched_t sched =
@@ -50,8 +55,10 @@ static std::vector<float> run(const Case & c, std::vector<ggml_backend_t> backen
     }
     ggml_backend_sched_free(sched);
     ggml_backend_buffer_free(buf);
+    if (buf_cpu) ggml_backend_buffer_free(buf_cpu);
     ggml_free(ctx);
     ggml_free(ctx_in);
+    ggml_free(ctx_cpu);
     return out;
 }
 
@@ -70,33 +77,34 @@ int main(int argc, char ** argv) {
 
     const std::vector<Case> cases = {
         // an intermediate used on the TPU and by an op the TPU rejects: the CPU split reads it
-        {"intermediate read by a CPU split", [](ggml_context * ci, ggml_context * ctx, ggml_cgraph *) {
-             Built b;
+        {"intermediate read by a CPU split", [](Built & b, ggml_context * ci, ggml_context * ctx, ggml_cgraph *) {
              ggml_tensor * h = ggml_mul(ctx, input(ci, b, 16, 8), input(ci, b, 16, 8));
              ggml_tensor * r = ggml_rms_norm(ctx, h, 1e-6f);
              ggml_tensor * s = ggml_leaky_relu(ctx, h, 0.1f, false);
              b.out = ggml_add(ctx, r, s);
-             return b;
          }},
         // a computed tensor updated in place, then read through the original tensor
-        {"read after in-place write", [](ggml_context * ci, ggml_context * ctx, ggml_cgraph * gf) {
-             Built b;
+        {"read after in-place write", [](Built & b, ggml_context * ci, ggml_context * ctx, ggml_cgraph * gf) {
              ggml_tensor * x = input(ci, b, 16, 8), * y = input(ci, b, 16, 8);
              ggml_tensor * z = input(ci, b, 16, 8), * w = input(ci, b, 16, 8);
              ggml_tensor * a = ggml_mul(ctx, x, y);
              ggml_build_forward_expand(gf, ggml_add_inplace(ctx, a, z));
              b.out = ggml_mul(ctx, a, w);
-             return b;
          }},
         // a whole-tensor copy into a destination nothing has written yet
-        {"copy into an unwritten tensor", [](ggml_context * ci, ggml_context * ctx, ggml_cgraph * gf) {
-             Built b;
+        {"copy into an unwritten tensor", [](Built & b, ggml_context * ci, ggml_context * ctx, ggml_cgraph * gf) {
              ggml_tensor * a = ggml_mul(ctx, input(ci, b, 16, 8), input(ci, b, 16, 8));
              ggml_tensor * d = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, 16, 8);
              ggml_tensor * c = ggml_cpy(ctx, a, d);
              ggml_build_forward_expand(gf, c);
              b.out = ggml_scale(ctx, ggml_cast(ctx, c, GGML_TYPE_F32), 2.0f);
-             return b;
+         }},
+        // with partial offload llama.cpp hands the TPU a copy of a permuted view of a CPU-resident KV cache;
+        // the scheduler's copy keeps the view's strides, so the TPU sees a root that is not dense
+        {"strided root copied from the CPU", [](Built & b, ggml_context * ci, ggml_context * ctx, ggml_cgraph *) {
+             ggml_tensor * x = input(ci, b, 16, 32);
+             ggml_tensor * v = input(b.cpu_ctx, b, 32, 16);
+             b.out = ggml_mul(ctx, x, ggml_transpose(ctx, v));
          }},
     };
 

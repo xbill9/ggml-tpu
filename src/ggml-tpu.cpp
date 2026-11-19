@@ -182,6 +182,7 @@ struct Buffer {
         drop(off, size);
         Entry e{size, et, sh, nullptr, {}, false};
         if (converted_on_upload(R)) {
+            if (!ggml_is_contiguous(R)) throw std::runtime_error(std::string("quantized tensor is not dense: ") + R->name);
             std::vector<std::vector<uint8_t>> conv;
             to_device_parts(R, host + off, conv);
             for (int i = 0; i < parts; i++) {

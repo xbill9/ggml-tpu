@@ -1,5 +1,7 @@
 # ggml-tpu
 
+**Unofficial.** An independent, out-of-tree project, not part of ggml-org/llama.cpp and not made or endorsed by Google. It needs no changes to llama.cpp.
+
 A ggml backend that runs llama.cpp models through XLA, the compiler behind JAX and TPUs. It loads into an unmodified llama.cpp build as an out-of-tree backend (`GGML_BACKEND_PATH`) and shows up as device `TPU0`.
 
 #### How it works
@@ -8,7 +10,7 @@ llama.cpp hands each backend a graph of tensor operations. Every other ggml back
 
 - **Weights and the KV cache stay on the device.** Each ggml buffer keeps a host copy of its bytes plus device arrays for the tensors that live on the device; a device array is downloaded only when llama.cpp reads it back.
 - **Views are memory views.** ggml views (reshape, permute, KV cache slices) are offsets and strides into a parent tensor. They are lowered to reshape + slice + transpose when the strides allow it, and to gather/scatter otherwise. In-place writes (`SET_ROWS` into the KV cache, `CPY` into a view) update the parent tensor's value inside the program and come back as program outputs.
-- **Program outputs** are the graph's final nodes, tensors llama.cpp flags as outputs, and every tensor the graph writes in place. Other intermediates are dropped; reading one aborts with a message naming `GGML_TPU_MATERIALIZE_ALL=1`.
+- **Program outputs** are the graph's final nodes, tensors llama.cpp flags as outputs, and every tensor the graph writes in place. So are the inputs of any operation this backend turns down, because llama.cpp's scheduler runs that operation on the CPU and reads its inputs from here afterwards. Other intermediates are dropped; reading one aborts with a message naming `GGML_TPU_MATERIALIZE_ALL=1`. Keeping every intermediate costs half the speed (below).
 - **Q4_0 and Q8_0 weights** have three device formats, chosen with `GGML_TPU_QUANT`:
   - `bf16` (default): dequantized to bf16 once, on upload. Fastest, but bf16 rounding changes most weights: on `gemma-4-E2B-it-q4_0-exact.gguf`, 70.7% of the file's 4,628,283,392 Q4_0 weights change value, by at most 0.39%. Takes 3.6x the device memory of the packed blocks.
   - `int8`: exact. Two arrays per weight, int8 codes and one f32 scale per 32-weight block, both stored column-major (K before M), which is the layout the TPU's int8 matrix multiply wants; in row-major order XLA transposed every weight in every program. Every weight is rebuilt exactly as code × scale inside the matrix multiply. The weights stay exact at any precision; the activations are rounded to bf16 below `GGML_TPU_PRECISION=HIGHEST`.
@@ -79,10 +81,11 @@ export GGML_TPU_PLATFORM=cpu JAX_PLATFORMS=cpu
 | `GGML_TPU_DUMP_DIR` | where `.mlir` dumps go |
 | `GGML_TPU_MATERIALIZE_ALL` | keep every intermediate tensor on the device |
 | `GGML_TPU_MEMORY_MB` | device memory to report when the platform reports none (default 8192) |
+| `GGML_TPU_MAX_PROGRAMS` | compiled programs kept per backend; the least recently used is freed beyond it (default 64, `0` = no limit) |
 
 #### Tests
 
-`test-backend-ops -b TPU0 -o <OP>` compares each operation against llama.cpp's CPU backend. `tools/compare.cpp` (`build/tpu-compare -m model.gguf`) loads one model twice, on the CPU and on this backend, feeds both the same tokens and compares the logits at every step.
+`test-backend-ops -b TPU0 -o <OP>` compares each operation against llama.cpp's CPU backend. `tools/regress.cpp` (`build/tpu-regress`) runs whole graphs through `ggml_backend_sched` with the CPU as fallback, as llama.cpp does, and compares them with the CPU alone: an intermediate read by a CPU split, a read after an in-place write, a copy into a tensor nothing has written. `tools/compare.cpp` (`build/tpu-compare -m model.gguf`) loads one model twice, on the CPU and on this backend, feeds both the same tokens and compares the logits at every step.
 
 Measured 2026-11-18 on the CPU through XLA (jax 0.11.0, llama.cpp `7182ef71e`):
 

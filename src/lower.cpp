@@ -123,7 +123,9 @@ void root_array_desc(const ggml_tensor * t, int part, Shape & sh, std::string & 
         return;
     }
     if (is_plain(t->type)) {
-        sh = shape4(t);
+        // a root that is not dense (ggml_backend_sched copies a permuted view with the view's strides) lives on
+        // the device as its raw memory span; reads and writes index it by byte strides, as views do
+        sh = ggml_is_contiguous(t) ? shape4(t) : Shape{1, 1, 1, (int64_t) (ggml_nbytes(t) / ggml_type_size(t->type))};
         et = et_of(t->type);
     } else {
         sh = {t->ne[3], t->ne[2], t->ne[1], (int64_t) ggml_row_size(t->type, t->ne[0])};
@@ -368,6 +370,7 @@ private:
         auto it = nodeval_.find(t);
         if (it != nodeval_.end() && nodever_[t] == rootver_[root_of(t)]) return it->second;
         if (t->view_src) return read_layout(rootvalue(t->view_src), t->view_src, t);
+        if (is_plain(t->type) && !ggml_is_contiguous(t)) return read_layout(rootvalue(t), t, t);
         return rootvalue(t);
     }
 
@@ -572,8 +575,8 @@ private:
         if (is_plain(R->type)) {
             if (X->type != R->type) throw std::runtime_error("ggml-tpu: view type differs from root type");
             const int64_t esz = (int64_t) ggml_type_size(R->type);
-            const int64_t N = ggml_nelements(R);
-            if (X->view_offs == 0 && ggml_are_same_shape(X, R) && ggml_is_contiguous(X)) return rv;
+            const int64_t N = rv.nelem();
+            if (X->view_offs == 0 && ggml_are_same_shape(X, R) && ggml_is_contiguous(X) && ggml_is_contiguous(R)) return rv;
             V flat = b_.reshape(rv, {N});
             std::vector<Dim> dims;
             for (int k = 0; k < 4; k++) dims.push_back({k, X->ne[k], (int64_t) X->nb[k] / esz});
@@ -588,7 +591,7 @@ private:
             throw std::runtime_error("ggml-tpu: unsupported in-place write into " + std::string(ggml_type_name(R->type)));
         }
         const int64_t esz = (int64_t) ggml_type_size(R->type);
-        const int64_t N = ggml_nelements(R);
+        const int64_t N = rv.nelem();
         if (X->view_offs == 0 && ggml_nelements(X) == N && ggml_is_contiguous(X)) return b_.reshape(v, rv.sh);
         V flat = b_.reshape(rv, {N});
         std::vector<Dim> dims;
@@ -1053,6 +1056,7 @@ Lowered Lowerer::run(const ggml_cgraph * g) {
         const ggml_tensor * R = root_of(X);
         if (X->view_src) {
             const bool whole = X->view_offs == 0 && ggml_nelements(X) == ggml_nelements(R) && ggml_is_contiguous(X) &&
+                               ggml_is_contiguous(R) &&
                                X->type == R->type && is_plain(R->type);
             if (whole && !rootval_.count(R)) {
                 // overwrites all of R: its old contents are not needed, so R is not a program input
@@ -1065,6 +1069,7 @@ Lowered Lowerer::run(const ggml_cgraph * g) {
             }
             if (written_set_.insert(R).second) written_.push_back(R);
         } else {
+            if (!ggml_is_contiguous(X)) throw std::runtime_error(std::string("ggml-tpu: computed tensor is not dense: ") + X->name);
             rootval_[X] = v;
             if (computed_set_.insert(X).second) computed_.push_back(X);
         }

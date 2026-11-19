@@ -23,7 +23,7 @@ cd ~/ggml-tpu && cmake -S . -B build -DLLAMA_CPP_DIR=$HOME/llama.cpp -DLLAMA_CPP
 
 - Every llama.cpp tool needs `GGML_BACKEND_PATH=$HOME/ggml-tpu/build/libggml-tpu.so`, `-dev TPU0` (without it the backend is never loaded) and `-fa off`.
 - On this workstation, test with the jax executor on CPU: `export GGML_TPU_PLATFORM=cpu JAX_PLATFORMS=cpu`.
-- Per-op: `~/llama.cpp/build-tpu/bin/test-backend-ops -b TPU0 -o <OP>`. Whole model: `build/tpu-compare -m model.gguf` (logits vs the CPU backend). No test suite or CI exists in this repo.
+- Per-op: `~/llama.cpp/build-tpu/bin/test-backend-ops -b TPU0 -o <OP>`. Graph patterns through the scheduler: `build/tpu-regress` (add a case there for every graph-level bug). Whole model: `build/tpu-compare -m model.gguf` (logits vs the CPU backend). No test suite or CI exists in this repo.
 - Expected failures, not regressions: GET_ROWS 37/56 in the default `GGML_TPU_QUANT=bf16` mode (bf16 rounding of weights) — use `packed` or `int8` for exact op tests; SUM 7/8 (near-zero total, flaky).
 - Reading a dropped intermediate tensor aborts; set `GGML_TPU_MATERIALIZE_ALL=1` when debugging.
 
@@ -37,7 +37,7 @@ cd ~/ggml-tpu && cmake -S . -B build -DLLAMA_CPP_DIR=$HOME/llama.cpp -DLLAMA_CPP
 
 ## Conventions
 
-- Lint: `run-clang-tidy -p build -quiet 'ggml-tpu/(src|tools)/'` (bug-finding checks in `.clang-tidy`; needs `build/compile_commands.json`, exported by CMake). 18 warnings existed when it was added (2026-11-19); don't add new ones in code you touch.
+- Lint: `run-clang-tidy -p build -quiet 'ggml-tpu/(src|tools)/'` (bug-finding checks in `.clang-tidy`; needs `build/compile_commands.json`, exported by CMake). 17 warnings remain (2026-11-19); don't add new ones in code you touch.
 - Match the existing llama.cpp-like style by hand (no formatter): 4-space indent, `namespace tpu`, `static` free functions, `const char * p` pointer spacing, `// ----` section dividers.
 - Commit messages: `ggml-tpu: <summary>`.
 - README results are measurements: each table states the date, jax (or libtpu) version, llama.cpp commit, TPU type/zone and the model's SHA-256. Only add numbers produced by a command run in the session; keep the README's terse, numbers-first voice.

@@ -128,7 +128,11 @@ public:
     }
 
     Handle upload(const void * data, size_t nbytes, const std::string & et, const std::vector<int64_t> & shape) override {
-        (void) nbytes;
+        size_t n = elem_size(et);
+        for (int64_t d : shape) n *= (size_t) d;
+        if (n != nbytes) {
+            throw std::runtime_error("ggml-tpu: upload of " + std::to_string(nbytes) + " bytes as " + std::to_string(n) + " (" + et + ")");
+        }
         auto a = PJRT_ARGS(PJRT_Client_BufferFromHostBuffer_Args);
         a.client = client_;
         a.data = data;
@@ -253,6 +257,14 @@ public:
     }
 
 private:
+    static size_t elem_size(const std::string & et) {
+        if (et == "f32" || et == "i32") return 4;
+        if (et == "f16" || et == "bf16" || et == "i16") return 2;
+        if (et == "i64") return 8;
+        if (et == "i8" || et == "ui8") return 1;
+        throw std::runtime_error("ggml-tpu: no element size for " + et);
+    }
+
     static PJRT_Buffer_Type buffer_type(const std::string & et) {
         if (et == "f32") return PJRT_Buffer_Type_F32;
         if (et == "f16") return PJRT_Buffer_Type_F16;
