@@ -13,11 +13,31 @@ llama.cpp hands each backend a graph of tensor operations. Every other ggml back
 - **The graph cache** is keyed by a fingerprint of the graph's tensors, so a graph llama.cpp reuses skips lowering; programs are also cached by their text.
 - **Recompiles** happen when the graph's shape changes: once for the prompt batch size and once for single-token decode, and again when llama.cpp's KV window grows (it pads to 256).
 
-The executor runs XLA through an embedded Python interpreter with JAX (`src/exec_jax.cpp`), so one build works on the CPU for testing and on a TPU VM with `jax[tpu]`. A direct PJRT C API executor for `libtpu.so` is a stub (`src/exec_pjrt.cpp`).
+#### Two executors
+
+The lowering is shared. What differs is how the compiled program reaches the device; `GGML_TPU_EXECUTOR` picks one at run time.
+
+**Option 1 — `libtpu` directly (`GGML_TPU_EXECUTOR=pjrt`, `src/exec_pjrt.cpp`).** The backend loads `libtpu.so` with `dlopen`, calls its one exported function, `GetPjrtApi`, and drives the TPU through the PJRT C API (`third_party/pjrt_c_api.h`, from openxla/xla). The program text goes to `PJRT_Client_Compile` in the `"mlir"` format. Compile options are a serialized protobuf; the build generates XLA's defaults with Python once (`tools/gen_compile_options.py`) and embeds the bytes, so nothing runs Python at run time. Downloads ask for a dense row-major host layout, because PJRT otherwise copies out in the compiler's device layout.
+
+- 🟢 No Python or JAX at run time; build with `-DGGML_TPU_JAX=OFF` and the library links only ggml and libc.
+- 🟢 Faster on the TPU: 120.9 tok/s decode against 100.8 (below).
+- ❌ Needs a PJRT plugin, so it only runs where there is one. This repo has been run with `libtpu` 0.0.17 (PJRT API 0.69) on a TPU v5e; there is no CPU plugin on a workstation, so every test of this path needs a TPU.
+- ⚠️ `libtpu.so` is a separate download (the `libtpu` pip wheel, 354 MB) that llama.cpp could not bundle; its license terms are not checked here.
+
+**Option 2 — JAX (`GGML_TPU_EXECUTOR=jax`, `src/exec_jax.cpp`, the default when built with `GGML_TPU_JAX=ON`).** The backend embeds the Python interpreter that has JAX installed and hands it the program text and the arrays.
+
+- 🟢 Runs on any platform JAX has, including the CPU, so the lowering can be tested on a workstation against llama.cpp's CPU backend.
+- 🟢 JAX finds `libtpu` and sets it up itself.
+- ❌ Embeds Python: the build links `libpython`, and the Python found at build time must have `jax`, `numpy` and `ml_dtypes`.
+- ❌ Slower on the TPU, by the Python work in every upload, download and run.
+
+So, which one? `pjrt` on a TPU, and the only candidate for llama.cpp upstream; `jax` for developing the lowering on a machine without a TPU.
+
+Library search for `pjrt`: `GGML_TPU_LIBTPU`, then `TPU_LIBRARY_PATH`, then `libtpu.so` on the loader path. On a TPU VM with `jax[tpu]` installed it is `~/.local/lib/python3.10/site-packages/libtpu/libtpu.so`. `GGML_TPU_COMPILE_OPTIONS_FILE` replaces the embedded compile options with a file's bytes.
 
 #### Build
 
-Needs a llama.cpp tree built with `BUILD_SHARED_LIBS=ON`, and a Python 3 with `jax` installed as a shared library (`libpython3.x.so`).
+Needs a llama.cpp tree built with `BUILD_SHARED_LIBS=ON`. The JAX executor (on by default) also needs a Python 3 with `jax` and a shared `libpython3.x.so`; `-DGGML_TPU_JAX=OFF` builds the `libtpu` executor alone.
 
 ```bash
 cd ~/llama.cpp
@@ -45,6 +65,8 @@ export GGML_TPU_PLATFORM=cpu JAX_PLATFORMS=cpu
 | Variable | Effect |
 | --- | --- |
 | `GGML_BACKEND_PATH` | path to `libggml-tpu.so` (read by ggml) |
+| `GGML_TPU_EXECUTOR` | `pjrt` or `jax` (see above) |
+| `GGML_TPU_LIBTPU` | path to `libtpu.so` for `pjrt` |
 | `GGML_TPU_PLATFORM` | JAX platform to use (`cpu`, `tpu`); default is JAX's default |
 | `GGML_TPU_PRECISION` | XLA dot precision: `DEFAULT`, `HIGH`, `HIGHEST` (default `HIGHEST`); below `HIGHEST`, matrix multiplies take bf16 operands with f32 accumulation |
 | `GGML_TPU_QUANT` | `bf16` (default) or `packed`, see above |
@@ -103,8 +125,17 @@ With `GGML_TPU_SYNC=1` the device time per decode token is 7.03 ms in `bf16` mod
 | Q4_0, `bf16` mode, `HIGHEST` | 8 of 9 | 3.2e-2 |
 | the same Q4_0 weights converted to an F32 GGUF (`llama-quantize --allow-requantize … F32`), `HIGHEST` | 9 of 9 | 1.1e-4 (most steps near 1e-6) |
 
+Both executors on the same TPU, 2026-11-19, Gemma 4 E2B Q4_0, `GGML_TPU_QUANT=bf16`, `GGML_TPU_PRECISION=DEFAULT`, `llama-bench -ngl 99 -fa 0`, 3 repetitions:
+
+| Executor | Prompt, 512 tokens | Decode, 128 tokens | `tpu-compare`, 9 steps |
+| --- | --- | --- | --- |
+| `pjrt` (`libtpu` 0.0.17) | 7638 ± 125 tok/s | 120.93 ± 0.07 tok/s | 8 of 9, worst 3.597e-2 |
+| `jax` (jax 0.6.2) | 6980 ± 756 tok/s | 100.79 ± 0.17 tok/s | 8 of 9, worst 3.597e-2 |
+
+The two give the same logits. Through `pjrt`, every operation test passed on the TPU: all the suites in the table above, with MUL_MAT (f16, q4_0, q8_0) and GET_ROWS run in `packed` mode.
+
 With identical f32 weights and f32 arithmetic on both sides the TPU tracks the CPU closely, so the larger error on Q4_0 comes from the quantized arithmetic paths: llama.cpp's CPU rounds activations to 8 bits before each Q4_0 matrix multiply, and `bf16` mode rounds the weights.
 
 #### Not supported yet
 
-Flash attention (run with `-fa off`), mixture-of-experts ops, quantized types other than Q4_0 and Q8_0, ALiBi, attention sinks, multi-section RoPE, and the PJRT C API executor.
+Flash attention (run with `-fa off`), mixture-of-experts ops, quantized types other than Q4_0 and Q8_0, ALiBi, attention sinks, and multi-section RoPE.

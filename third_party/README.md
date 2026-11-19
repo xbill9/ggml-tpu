@@ -1,0 +1,1 @@
+`pjrt_c_api.h` is `xla/pjrt/c/pjrt_c_api.h` from https://github.com/openxla/xla, fetched 2026-11-18 from `main` (head was `23db20cba2060ff029a5d86e7a6777715cc93936`; PJRT C API version 0.118). Apache License 2.0, see the file header.

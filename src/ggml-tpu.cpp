@@ -39,9 +39,23 @@ Executor * executor() {
     static Executor * ex = nullptr;
     std::call_once(once, [] {
         const char * which = getenv("GGML_TPU_EXECUTOR");
+#ifdef GGML_TPU_WITH_JAX
         std::string w = which ? which : "jax";
+#else
+        std::string w = which ? which : "pjrt";
+#endif
         try {
-            ex = w == "pjrt" ? make_pjrt_executor() : make_jax_executor();
+            if (w == "pjrt") {
+                ex = make_pjrt_executor();
+            } else if (w == "jax") {
+#ifdef GGML_TPU_WITH_JAX
+                ex = make_jax_executor();
+#else
+                throw std::runtime_error("built without the JAX executor (GGML_TPU_JAX=OFF)");
+#endif
+            } else {
+                throw std::runtime_error("unknown GGML_TPU_EXECUTOR " + w);
+            }
             GGML_LOG_INFO("ggml-tpu: executor %s: %s\n", w.c_str(), ex->description().c_str());
         } catch (const std::exception & e) {
             GGML_LOG_WARN("ggml-tpu: no device (%s)\n", e.what());
