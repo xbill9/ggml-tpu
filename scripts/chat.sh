@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # On this workstation: tunnel to llama-server on the TPU VM (scripts/serve.sh) and open the chat page.
 # usage: scripts/chat.sh            then browse http://localhost:8765
-# env:   TPU_NODE (ggml-tpu-burnin-node), TPU_ZONE (us-west4-a), TPU_PROJECT (aisprint-491218),
+# env:   TPU_NODE (ggml-tpu-burnin-node), TPU_ZONE (us-west4-a), TPU_PROJECT (active gcloud project),
 #        REMOTE_PORT (8090), LOCAL_PORT (8090), UI_PORT (8765), IAP=1 to tunnel through IAP
 set -euo pipefail
 NODE=${TPU_NODE:-ggml-tpu-burnin-node}
 ZONE=${TPU_ZONE:-us-west4-a}
-PROJECT=${TPU_PROJECT:-aisprint-491218}
+PROJECT=${TPU_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 LP=${LOCAL_PORT:-8090}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
