@@ -153,6 +153,15 @@ Weight formats on the same TPU, 2026-11-19, `pjrt` executor, `llama-bench -ngl 9
 
 The `tpu-compare` rows for `int8` were measured with the row-major layout, which computes the same values. XLA's optimized decode program has no copies of the int8 weights and no weight-sized intermediate arrays, so the multiply consumes the int8 codes directly; the remaining gap to `bf16` is not explained here.
 
+Keeping every intermediate on the same TPU, 2026-11-19, `pjrt`, `bf16`, `DEFAULT`, `llama-bench -ngl 99 -fa 0`, 3 repetitions:
+
+| `GGML_TPU_MATERIALIZE_ALL` | Prompt, 512 tokens | Decode, 128 tokens |
+| --- | --- | --- |
+| unset (graph outputs, in-place writes and inputs of operations run elsewhere) | 7663.68 ± 118.77 tok/s | 123.98 ± 0.33 tok/s |
+| `1` (every intermediate) | 3276.90 ± 14.69 tok/s | 57.33 ± 0.08 tok/s |
+
+Partial offload works: with `-ngl 10`, `-ngl 25` and `-ngl 99`, `llama-completion` completes "The capital of France is" with "Paris." on the TPU. llama.cpp then hands the backend copies of permuted KV-cache views that keep the view's strides; those live on the device as their raw memory span.
+
 #### Speculative decoding
 
 `scripts/drafter-test.sh` serves Gemma 4 E2B through `llama-server` on the TPU, with and without the exact Q4_0 QAT drafter (`xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf`, SHA-256 `060f5a01…`, `--spec-type draft-mtp --spec-draft-n-max 2`, drafter also on `TPU0`), `bf16` weights, `pjrt`, 256 tokens at temperature 0. The server's own timings, second request for each prompt:
