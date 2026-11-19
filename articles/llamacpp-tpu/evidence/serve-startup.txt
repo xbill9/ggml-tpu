@@ -1,0 +1,17 @@
+# Captured 2026-11-19 on the same TPU. scripts/serve.sh (llama-server, -dev TPU0, pjrt, bf16, DEFAULT), no drafter, no program cache.
+download 27.100876905 s
+419db9a6bf3bc15d770c85ccf9216827aa88c64fe8f3d72fbe5674f48efe2dc8  /home/xbill/models/gemma-4-E2B-it-q4_0-exact.gguf
+restart: launch -> /health 13.528799931 s
+first request: 18.154300936 s
+request 2: .112339159 s
+
+# Same request through the SSH tunnel and the local chat page proxy (thinking off):
+'The capital of France is Paris.'
+server prompt 19 tok 32 ms; decode 8 tok 109.7 tok/s
+wall via tunnel .345320373 s
+
+# A 400-token-limit request with thinking on, first time at this length (crosses the 256-token KV window):
+"timings":{"cache_n":1,"prompt_n":24,"prompt_ms":9006.956,"prompt_per_token_ms":375.2898333333333,"prompt_per_second":2.6646072213520307,"predicted_n":278,"predicted_ms":7644.115,"predicted_per_token_ms":27.596083032490974,"predicted_per_second":36.23702678465722}
+# The same request twice more, compiled:
+prompt 5 tok 25 ms; decode 348 tok 112.3 tok/s
+prompt 5 tok 25 ms; decode 281 tok 112.2 tok/s

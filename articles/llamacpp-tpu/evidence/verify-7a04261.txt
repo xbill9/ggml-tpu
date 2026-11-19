@@ -1,0 +1,18 @@
+# Captured 2026-11-19, same TPU, ggml-tpu 7a04261 (non-dense roots), pjrt executor. Command: bash ~/verify2.sh. Output verbatim.
+7a04261 ggml-tpu: non-dense roots, unofficial framing in the README
+[ 72%] Built target tpu-regress
+[100%] Built target ggml-tpu
+== tpu-regress
+0 intermediate read by a CPU split   OK    max rel err 9.61e-08
+1 read after in-place write          OK    max rel err 0
+2 copy into an unwritten tensor      OK    max rel err 0.00021
+3 strided root copied from the CPU   OK    max rel err 0
+== -ngl 10: The capital of France is Paris. [end of text]
+== -ngl 25: The capital of France is Paris. [end of text]
+== -ngl 99: The capital of France is Paris. [end of text]
+== llama-bench
+| gemma4 E2B Q4_0                |   2.43 GiB |     4.63 B | TPU        |  99 |   0 | TPU0         |           pp512 |     7641.86 ± 117.18 |
+| gemma4 E2B Q4_0                |   2.43 GiB |     4.63 B | TPU        |  99 |   0 | TPU0         |           tg128 |        122.56 ± 0.08 |
+== tpu-compare
+argmax agreement 9/10, worst nmse 3.597e-02
+== chat server up

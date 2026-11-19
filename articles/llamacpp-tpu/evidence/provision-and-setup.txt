@@ -1,0 +1,15 @@
+# Captured 2026-11-19 from this workstation. Flex-start v5e-1 queued resource, then setup on the VM.
+$ gcloud alpha compute tpus queued-resources create ggml-tpu-burnin --zone=us-west4-a --project=<project> --runtime-version=v2-alpha-tpuv5-lite --node-id=ggml-tpu-burnin-node --accelerator-type=v5litepod-1 --provisioning-model=flex-start --max-run-duration=6h --valid-until-duration=2h --labels=purpose=ggml-tpu-burnin
+Created queued_resource [ggml-tpu-burnin].
+16:19:20   (UTC, when the create returned)
+ACTIVE 16:21:54   (UTC, first poll that saw ACTIVE)
+
+$ bash ~/ggml-tpu/scripts/setup-tpu-vm.sh   (timed on the VM)
+setup rc=0 211s
+[100%] Built target ggml-tpu
+setup done
+
+VM: 24 vCPUs, 47 GB RAM, Python 3.10.12
+$ python3 -c "import jax, importlib.metadata as m; print('jax', jax.__version__, 'libtpu', m.version('libtpu'), jax.devices())"
+jax 0.6.2 libtpu 0.0.17 [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]
+llama.cpp 7182ef71e

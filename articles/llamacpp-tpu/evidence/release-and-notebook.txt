@@ -1,0 +1,33 @@
+# Captured 2026-11-19. Release v0.1.0 tarball built by scripts/build-release.sh on the TPU VM (Ubuntu 22.04).
+-rw-rw-r-- 1 xbill xbill 7122071 Nov 19 19:34 /home/xbill/ggml-tpu-a4a425d-llama.cpp-7182ef71e-linux-x86_64.tar.gz
+400e2a629c28a5f262a185de09458b56ab0c19147bcd3232a4ab3aa81eea1beb  (sha256, downloaded on the VM from the release URL)
+
+# The notebook's three code cells run as one script on the TPU VM, empty work directory, empty Hugging Face cache:
+ggml-tpu a4a425de42efeefb94a4b9f06fff7b9dbfb568cb
+llama.cpp 7182ef71e6d5dd0c8ea76486fac134fcd25025d4
+built 2026-11-19T19:34Z on Ubuntu 22.04.3 LTS
+
+libtpu  0.0.17
+jax     0.6.2
+libtpu.so: /home/xbill/.local/lib/python3.10/site-packages/libtpu/libtpu.so
+
+cell 1 done 1 s after it started; the model is still downloading
+=== cell 2
+model ready 27 s after cell 1 started: /home/xbill/.cache/huggingface/hub/models--xbill9--gemma-4-E2B-it-qat-q4_0-exact-gguf/snapshots/74b2c92c8f7f84d3d9c39e8026f6a28f62788255/gemma-4-E2B-it-q4_0-exact.gguf
+llama-server ready in 13.3 s, 40 s after cell 1 started
+not on Colab: open http://127.0.0.1:8765 in a browser on this machine
+=== cell 3
+The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter blue wavelengths of sunlight are scattered more effectively by the Earth's atmosphere than other colors.
+
+33 tokens in 17.9 s; the server decoded at 6.2 tokens/s
+the first request at a new length includes an XLA compile; run this cell again to see the compiled speed
+notebook script total 58.576598347 s
+
+# The release llama-server with libtpu 0.0.50 (the wheel for Python 3.13, the libtpu a Colab v5e-1 runtime had on 2026-11-17):
+libtpu-0.0.50-cp313-cp313-manylinux_2_31_x86_64.whl
+libtpu.so: /home/xbill/libtpu50/x/libtpu/libtpu.so
+up in 15.234242224 s
+'The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter blu' 33 tok 6.0 tok/s
+request 1 21.325293300 s
+'The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter blu' 33 tok 106.2 tok/s
+request 2 .393993403 s

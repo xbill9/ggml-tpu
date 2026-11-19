@@ -1,0 +1,4 @@
+# rounded from "restart: launch -> /health 13.528799931 s" in evidence/serve-startup.txt
+13.5 s
+# rounded from "== draft: launch -> /health 18.467643207 s" in evidence/drafter-ab.txt
+18.5 s

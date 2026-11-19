@@ -1,0 +1,16 @@
+# Captured 2026-11-19 on the same TPU. scripts/serve.sh with and without DRAFT=1 (exact Q4_0 QAT drafter on TPU0,
+# --spec-type draft-mtp --spec-draft-n-max 2), chat completions, 256 tokens, temperature 0, thinking off.
+# Each prompt is sent once to compile, then measured on the second request.
+43fbe7b ggml-tpu: serve.sh DRAFT=1 serves with the exact Q4_0 QAT drafter
+== base: launch -> /health 13.768881281 s
+  'Explain how a TPU differs from a GPU.': 256 tok, 109.04 tok/s; text starts 'While both **TPUs (Tensor Processing Units)** and **GPUs (Gr'
+  'Write a short story about a lighthouse keeper.': 256 tok, 109.05 tok/s; text starts 'The wind was a constant, abrasive companion to Silas. It cla'
+  'List ten facts about Paris.': 256 tok, 111.01 tok/s; text starts 'Here are ten facts about Paris:\n\n1. **The City of Lights:** '
+== draft: launch -> /health 18.467643207 s
+  'Explain how a TPU differs from a GPU.': 256 tok, 142.46 tok/s, drafted 123 of 264 accepted; text starts 'While both **TPUs (Tensor Processing Units)** and **GPUs (Gr'
+  'Write a short story about a lighthouse keeper.': 256 tok, 129.42 tok/s, drafted 106 of 296 accepted; text starts 'The wind was a constant, abrasive companion to Silas. It cla'
+  'List ten facts about Paris.': 256 tok, 151.67 tok/s, drafted 129 of 250 accepted; text starts 'Here are ten facts about Paris:\n\n1. **The City of Lights:** '
+# speed-ups computed from the rates above
+TPU vs GPU: 1.31x, acceptance 0.466
+lighthouse: 1.19x, acceptance 0.358
+Paris: 1.37x, acceptance 0.516

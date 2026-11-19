@@ -1,0 +1,56 @@
+# Captured 2026-11-19 on a Cloud TPU v5e (v5litepod-1, flex-start, us-west4-a), jax 0.6.2, libtpu 0.0.17, llama.cpp 7182ef71e, ggml-tpu c51956d, pjrt executor.
+# Command: bash ~/verify.sh (tpu-regress, llama-bench, tpu-compare, partial offload, test-backend-ops). Output verbatim.
+c51956d ggml-tpu: fix review findings
+[ 81%] Built target tpu-regress
+[100%] Built target ggml-tpu
+== tpu-regress
+0 intermediate read by a CPU split   OK    max rel err 9.61e-08
+1 read after in-place write          OK    max rel err 0
+2 copy into an unwritten tensor      OK    max rel err 0.00021
+== llama-bench
+| gemma4 E2B Q4_0                |   2.43 GiB |     4.63 B | TPU        |  99 |   0 | TPU0         |           pp512 |     7668.38 ± 105.69 |
+| gemma4 E2B Q4_0                |   2.43 GiB |     4.63 B | TPU        |  99 |   0 | TPU0         |           tg128 |        122.02 ± 0.08 |
+== tpu-compare (bf16, DEFAULT)
+step  8  tokens_in=  1  max|diff|=9.103e-01  max|logit|=2.028e+01  nmse=3.597e-02  argmax cpu=106 tpu=106 same
+step  9  tokens_in=  1  max|diff|=6.820e-01  max|logit|=1.910e+01  nmse=2.779e-03  argmax cpu=107 tpu=107 same
+argmax agreement 9/10, worst nmse 3.597e-02
+== partial offload -ngl 10
+The capital of France is seen as the **" "s "
+== partial offload -ngl 25
+The capital of France is Paris. [end of text]
+== ops
+ADD [bf16]   156/156 tests passed
+SUB [bf16]   142/142 tests passed
+MUL [bf16]   143/143 tests passed
+DIV [bf16]   142/142 tests passed
+ROPE [bf16]   284/284 tests passed
+SOFT_MAX [bf16]   67/67 tests passed
+RMS_NORM [bf16]   53/53 tests passed
+NORM [bf16]   61/61 tests passed
+SET_ROWS [bf16]   126/126 tests passed
+CPY [bf16]   163/163 tests passed
+CONT [bf16]   78/78 tests passed
+CONCAT [bf16]   116/116 tests passed
+PAD [bf16]   26/26 tests passed
+SCALE [bf16]   7/7 tests passed
+SQR [bf16]   6/6 tests passed
+SQRT [bf16]   6/6 tests passed
+LOG [bf16]   6/6 tests passed
+SIN [bf16]   6/6 tests passed
+COS [bf16]   6/6 tests passed
+CLAMP [bf16]   8/8 tests passed
+SUM_ROWS [bf16]   10/10 tests passed
+MEAN [bf16]   10/10 tests passed
+DUP [bf16]   10/10 tests passed
+SUM [bf16]   7/8 tests passed
+GELU [bf16]   12/12 tests passed
+SILU [bf16]   12/12 tests passed
+GEGLU [bf16]   36/36 tests passed
+SWIGLU [bf16]   36/36 tests passed
+MUL_MAT [packed]   1069/1069 tests passed
+GET_ROWS [packed]   56/56 tests passed
+MUL_MAT [int8]   1069/1069 tests passed
+GET_ROWS [int8]   56/56 tests passed
+ops total 1223s
+
+[exited with code 0]
