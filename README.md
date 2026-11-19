@@ -184,6 +184,15 @@ Measured on the same runs:
 | first request, which compiles the prompt and decode programs | 22.5 s, 35.8 s with the drafter |
 | the same request once compiled | 3.5 s, 2.8 s with the drafter |
 
+**Program cache.** With `GGML_TPU_CACHE_DIR` set (`scripts/serve.sh` uses `~/.cache/ggml-tpu/programs`), the `pjrt` executor saves every compiled program with `PJRT_Executable_Serialize` and loads it back with `PJRT_Executable_DeserializeAndLoad`, keyed by program text, compile options, device kind and plugin version. `scripts/bootbench.sh`, 2026-11-19, same TPU, `pjrt`, `bf16`, `DEFAULT`, no drafter: launch `serve.sh`, then three chat turns of up to 256 tokens, each resending the history:
+
+| Program cache | Launch to `/health` | Turn 1 | Turn 2 | Turn 3 | Launch to third answer | Programs compiled |
+| --- | --- | --- | --- | --- | --- | --- |
+| empty | 13.8 s | 26.7 s (256 tokens) | 25.9 s (134 tokens) | 16.2 s (20 tokens) | 82.8 s | 11 |
+| filled by the run above | 8.6 s | 4.4 s | 2.9 s | 1.2 s | 17.3 s | 0 |
+
+The 11 programs take 593 MB on disk; a gzip -1 tarball of them is 138 MB. A cache is only valid for the same device kind and plugin version.
+
 Every new graph shape compiles once, and a new prompt length is a new shape: the second and third prompts' first requests took 3.9 s and 7.5 s against 3.7 s and 2.4 s once compiled. Compiles are cached only for the life of the process.
 
 With identical f32 weights and f32 arithmetic on both sides the TPU tracks the CPU closely, so the larger error on Q4_0 comes from the quantized arithmetic paths: llama.cpp's CPU rounds activations to 8 bits before each Q4_0 matrix multiply, and `bf16` mode rounds the weights.
