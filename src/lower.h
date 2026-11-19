@@ -10,14 +10,16 @@
 
 namespace tpu {
 
-// Device-array shape and element type used for a root (non-view) tensor.
-// Plain types: [ne3, ne2, ne1, ne0] of the element type.
-// Block-quantized types: [ne3, ne2, ne1, row_bytes] of ui8.
-void root_array_desc(const ggml_tensor * t, hlo::Shape & sh, std::string & et);
+// Device arrays used for a root (non-view) tensor: root_array_parts() of them, each with a shape and
+// element type. Plain types: one array [ne3, ne2, ne1, ne0]. Block-quantized types depend on
+// GGML_TPU_QUANT: bf16 [ne3, ne2, ne1, ne0]; int8 codes [.., ne0] plus f32 scales [.., ne0/32];
+// packed ui8 [.., row_bytes].
+int  root_array_parts(const ggml_tensor * t);
+void root_array_desc(const ggml_tensor * t, int part, hlo::Shape & sh, std::string & et);
 
-// Block-quantized roots that are converted on the host before upload (see GGML_TPU_QUANT).
+// Block-quantized roots that are converted on the host before upload; to_device_parts() does it.
 bool converted_on_upload(const ggml_tensor * t);
-void to_device_bytes(const ggml_tensor * t, const void * src, std::vector<uint8_t> & out);
+void to_device_parts(const ggml_tensor * t, const void * src, std::vector<std::vector<uint8_t>> & out);
 
 bool supports_op(const ggml_tensor * op);
 

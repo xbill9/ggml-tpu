@@ -9,7 +9,10 @@ llama.cpp hands each backend a graph of tensor operations. Every other ggml back
 - **Weights and the KV cache stay on the device.** Each ggml buffer keeps a host copy of its bytes plus device arrays for the tensors that live on the device; a device array is downloaded only when llama.cpp reads it back.
 - **Views are memory views.** ggml views (reshape, permute, KV cache slices) are offsets and strides into a parent tensor. They are lowered to reshape + slice + transpose when the strides allow it, and to gather/scatter otherwise. In-place writes (`SET_ROWS` into the KV cache, `CPY` into a view) update the parent tensor's value inside the program and come back as program outputs.
 - **Program outputs** are the graph's final nodes, tensors llama.cpp flags as outputs, and every tensor the graph writes in place. Other intermediates are dropped; reading one aborts with a message naming `GGML_TPU_MATERIALIZE_ALL=1`.
-- **Q4_0 and Q8_0 weights** are dequantized to bf16 once, on upload (`GGML_TPU_QUANT=bf16`, the default), which takes 3.6x the device memory of the packed blocks and rounds each weight to bf16. `GGML_TPU_QUANT=packed` keeps ggml's block layout on the device and dequantizes exactly inside every program, which on a TPU is half the decode speed (below).
+- **Q4_0 and Q8_0 weights** have three device formats, chosen with `GGML_TPU_QUANT`:
+  - `bf16` (default): dequantized to bf16 once, on upload. Fastest, but bf16 rounding changes most weights: on `gemma-4-E2B-it-q4_0-exact.gguf`, 70.7% of the file's 4,628,283,392 Q4_0 weights change value, by at most 0.39%. Takes 3.6x the device memory of the packed blocks.
+  - `int8`: exact. Two arrays per weight, int8 codes and one f32 scale per 32-weight block, both stored column-major (K before M), which is the layout the TPU's int8 matrix multiply wants; in row-major order XLA transposed every weight in every program. Every weight is rebuilt exactly as code × scale inside the matrix multiply. The weights stay exact at any precision; the activations are rounded to bf16 below `GGML_TPU_PRECISION=HIGHEST`.
+  - `packed`: ggml's 18- or 34-byte blocks as they are, dequantized exactly inside every program. Exact, and slower than `int8`.
 - **The graph cache** is keyed by a fingerprint of the graph's tensors, so a graph llama.cpp reuses skips lowering; programs are also cached by their text.
 - **Recompiles** happen when the graph's shape changes: once for the prompt batch size and once for single-token decode, and again when llama.cpp's KV window grows (it pads to 256).
 
@@ -69,7 +72,8 @@ export GGML_TPU_PLATFORM=cpu JAX_PLATFORMS=cpu
 | `GGML_TPU_LIBTPU` | path to `libtpu.so` for `pjrt` |
 | `GGML_TPU_PLATFORM` | JAX platform to use (`cpu`, `tpu`); default is JAX's default |
 | `GGML_TPU_PRECISION` | XLA dot precision: `DEFAULT`, `HIGH`, `HIGHEST` (default `HIGHEST`); below `HIGHEST`, matrix multiplies take bf16 operands with f32 accumulation |
-| `GGML_TPU_QUANT` | `bf16` (default) or `packed`, see above |
+| `GGML_TPU_QUANT` | `bf16` (default), `int8` or `packed`, see above |
+| `GGML_TPU_INT8_MATMUL` | `blockwise` scales per-block partial sums instead of the weights; measured slower (48.3 against 51.3 tok/s) |
 | `GGML_TPU_SYNC` | wait for the device after every program, so `GGML_TPU_VERBOSE=1` timings show device time |
 | `GGML_TPU_VERBOSE` | `1` logs compiles and unsupported ops, `2` also dumps programs |
 | `GGML_TPU_DUMP_DIR` | where `.mlir` dumps go |
@@ -89,6 +93,7 @@ Measured 2026-11-18 on the CPU through XLA (jax 0.11.0, llama.cpp `7182ef71e`):
 | ROPE, SOFT_MAX, RMS_NORM, NORM | 284/284, 67/67, 53/53, 61/61 |
 | GET_ROWS (with `GGML_TPU_QUANT=packed`), SET_ROWS, CPY, CONT, CONCAT, PAD | 56/56, 126/126, 163/163, 78/78, 116/116, 26/26 |
 | GET_ROWS with the default `GGML_TPU_QUANT=bf16` | 37/56 |
+| GET_ROWS, MUL_MAT q4_0, MUL_MAT q8_0 with `GGML_TPU_QUANT=int8` | 56/56, 111/111, 106/106 (on the CPU and on the TPU) |
 | 15 unary activations and 5 gated (GLU) activations | all |
 | SCALE, SQR, SQRT, LOG, SIN, COS, CLAMP, SUM_ROWS, MEAN, DUP | all |
 | SUM | 7/8 |
@@ -133,6 +138,41 @@ Both executors on the same TPU, 2026-11-19, Gemma 4 E2B Q4_0, `GGML_TPU_QUANT=bf
 | `jax` (jax 0.6.2) | 6980 ± 756 tok/s | 100.79 ± 0.17 tok/s | 8 of 9, worst 3.597e-2 |
 
 The two give the same logits. Through `pjrt`, every operation test passed on the TPU: all the suites in the table above, with MUL_MAT (f16, q4_0, q8_0) and GET_ROWS run in `packed` mode.
+
+Weight formats on the same TPU, 2026-11-19, `pjrt` executor, `llama-bench -ngl 99 -fa 0`, 3 repetitions:
+
+| `GGML_TPU_QUANT`, `GGML_TPU_PRECISION` | Weights exact | Prompt, 512 tokens | Decode, 128 tokens | `tpu-compare`, 9 steps |
+| --- | --- | --- | --- | --- |
+| `bf16`, `DEFAULT` | no | 7651 ± 104 tok/s | 123.58 ± 0.08 tok/s | 8 of 9, worst 3.597e-2 |
+| `bf16`, `HIGHEST` | no | 5729 ± 35 tok/s | 120.29 ± 0.08 tok/s | 8 of 9, worst 3.172e-2 |
+| `int8`, `DEFAULT` | yes | 6829 ± 93 tok/s | 51.28 ± 0.01 tok/s | 8 of 9, worst 3.264e-2 |
+| `int8`, `HIGHEST` | yes, and f32 activations | 4005 ± 3 tok/s | 51.32 ± 0.01 tok/s | 8 of 9, worst 3.225e-2 |
+
+The `tpu-compare` rows for `int8` were measured with the row-major layout, which computes the same values. XLA's optimized decode program has no copies of the int8 weights and no weight-sized intermediate arrays, so the multiply consumes the int8 codes directly; the remaining gap to `bf16` is not explained here.
+
+#### Speculative decoding
+
+`scripts/drafter-test.sh` serves Gemma 4 E2B through `llama-server` on the TPU, with and without your exact Q4_0 QAT drafter (`xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf`, SHA-256 `060f5a01…`, `--spec-type draft-mtp --spec-draft-n-max 2`, drafter also on `TPU0`), `bf16` weights, `pjrt`, 256 tokens at temperature 0. The server's own timings, second request for each prompt:
+
+| Prompt | Without drafter | With drafter | Drafted tokens accepted |
+| --- | --- | --- | --- |
+| "Explain how a TPU differs from a GPU." | 111.29 tok/s | 141.15 tok/s (1.27x) | 121 of 267 |
+| "Write a short story about a lighthouse keeper." | 111.17 tok/s | 122.84 tok/s (1.10x) | 99 of 309 |
+| "List ten facts about Paris." | 110.75 tok/s | 152.81 tok/s (1.38x) | 132 of 244 |
+
+#### Start-up time
+
+Measured on the same runs:
+
+| Step | Time |
+| --- | --- |
+| flex-start v5e-1 request, first status poll to `ACTIVE` | 2.1 min and 2.6 min (two requests) |
+| `scripts/setup-tpu-vm.sh` (`jax[tpu]`, llama.cpp and backend builds) | 3.5 min |
+| `llama-server` launch to `/health` answering | 14.7 s, 15.7 s with the drafter |
+| first request, which compiles the prompt and decode programs | 22.5 s, 35.8 s with the drafter |
+| the same request once compiled | 3.5 s, 2.8 s with the drafter |
+
+Every new graph shape compiles once, and a new prompt length is a new shape: the second and third prompts' first requests took 3.9 s and 7.5 s against 3.7 s and 2.4 s once compiled. Compiles are cached only for the life of the process.
 
 With identical f32 weights and f32 arithmetic on both sides the TPU tracks the CPU closely, so the larger error on Q4_0 comes from the quantized arithmetic paths: llama.cpp's CPU rounds activations to 8 bits before each Q4_0 matrix multiply, and `bf16` mode rounds the weights.
 

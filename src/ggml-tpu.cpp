@@ -69,11 +69,17 @@ Executor * executor() {
 // buffer: host shadow bytes + device-resident arrays for the tensors that live on the device
 
 struct Entry {
-    size_t              size;
-    std::string         et;
+    size_t               size;
+    std::string          et;     // first array's element type and shape, to detect a changed layout
     std::vector<int64_t> sh;
-    Handle              h;
-    bool                dirty;  // device copy is newer than the host bytes
+    Handle               h;      // first (often only) device array
+    std::vector<Handle>  extra;  // further arrays of a multi-array root (int8 weights: scales)
+    bool                 dirty;  // device copy is newer than the host bytes (single-array entries only)
+
+    void release() const {
+        executor()->release(h);
+        for (Handle x : extra) executor()->release(x);
+    }
 };
 
 struct Buffer {
@@ -83,7 +89,7 @@ struct Buffer {
     std::map<size_t, size_t>       poisoned;  // offset -> size: computed on device, never materialized
 
     ~Buffer() {
-        for (auto & kv : entries) executor()->release(kv.second.h);
+        for (auto & kv : entries) kv.second.release();
         free(host);
     }
 
@@ -111,7 +117,7 @@ struct Buffer {
     void drop(size_t off, size_t size) {
         overlapping(off, size, [&](size_t k, Entry & e) {
             if (e.dirty && (k < off || k + e.size > off + size)) executor()->download(e.h, host + k, e.size);
-            executor()->release(e.h);
+            e.release();
             entries.erase(k);
         });
     }
@@ -136,15 +142,20 @@ struct Buffer {
         unpoison(off, size);
     }
 
-    Handle array_for(const ggml_tensor * R) {
+    // device arrays for root R, uploading (and converting) the host bytes if needed; appends to args
+    void arrays_for(const ggml_tensor * R, std::vector<Handle> & args) {
         const size_t off = (uint8_t *) R->data - host;
         const size_t size = ggml_nbytes(R);
         std::vector<int64_t> sh;
         std::string et;
-        root_array_desc(R, sh, et);
+        root_array_desc(R, 0, sh, et);
+        const int parts = root_array_parts(R);
         auto it = entries.find(off);
-        if (it != entries.end() && it->second.size == size && it->second.et == et && it->second.sh == sh) {
-            return it->second.h;
+        if (it != entries.end() && it->second.size == size && it->second.et == et && it->second.sh == sh &&
+            (int) it->second.extra.size() == parts - 1) {
+            args.push_back(it->second.h);
+            args.insert(args.end(), it->second.extra.begin(), it->second.extra.end());
+            return;
         }
         if (poisoned_at(off, size)) {
             GGML_ABORT("ggml-tpu: tensor '%s' was computed on the device but not kept; rerun with "
@@ -152,16 +163,24 @@ struct Buffer {
         }
         sync_to_host(off, size);
         drop(off, size);
-        Handle h;
+        Entry e{size, et, sh, nullptr, {}, false};
         if (converted_on_upload(R)) {
-            std::vector<uint8_t> conv;
-            to_device_bytes(R, host + off, conv);
-            h = executor()->upload(conv.data(), conv.size(), et, sh);
+            std::vector<std::vector<uint8_t>> conv;
+            to_device_parts(R, host + off, conv);
+            for (int i = 0; i < parts; i++) {
+                std::vector<int64_t> psh;
+                std::string pet;
+                root_array_desc(R, i, psh, pet);
+                Handle h = executor()->upload(conv[i].data(), conv[i].size(), pet, psh);
+                if (i == 0) e.h = h;
+                else e.extra.push_back(h);
+            }
         } else {
-            h = executor()->upload(host + off, size, et, sh);
+            e.h = executor()->upload(host + off, size, et, sh);
         }
-        entries[off] = Entry{size, et, sh, h, false};
-        return h;
+        entries[off] = e;
+        args.push_back(e.h);
+        args.insert(args.end(), e.extra.begin(), e.extra.end());
     }
 
     void set_output(const ggml_tensor * R, Handle h) {
@@ -169,10 +188,11 @@ struct Buffer {
         const size_t size = ggml_nbytes(R);
         std::vector<int64_t> sh;
         std::string et;
-        root_array_desc(R, sh, et);
+        root_array_desc(R, 0, sh, et);
+        GGML_ASSERT(root_array_parts(R) == 1);
         drop(off, size);
         unpoison(off, size);
-        entries[off] = Entry{size, et, sh, h, true};
+        entries[off] = Entry{size, et, sh, h, {}, true};
     }
 
     void poison(const ggml_tensor * R) {
@@ -217,7 +237,7 @@ static void buf_get_tensor(ggml_backend_buffer_t buffer, const ggml_tensor * t, 
 
 static void buf_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     Buffer * b = (Buffer *) buffer->context;
-    for (auto & kv : b->entries) executor()->release(kv.second.h);
+    for (auto & kv : b->entries) kv.second.release();
     b->entries.clear();
     b->poisoned.clear();
     memset(b->host, value, b->size);
@@ -409,7 +429,7 @@ static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph
         args.reserve(L.params.size());
         for (const ggml_tensor * R : L.params) {
             GGML_ASSERT(R->buffer && R->buffer->buft == buffer_type());
-            args.push_back(((Buffer *) R->buffer->context)->array_for(R));
+            ((Buffer *) R->buffer->context)->arrays_for(R, args);
         }
         auto t3 = clk::now();
         std::vector<Handle> outs = ex->execute(p, args);

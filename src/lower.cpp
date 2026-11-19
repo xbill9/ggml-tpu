@@ -25,24 +25,68 @@ static bool is_plain(ggml_type t) {
 static bool is_float(ggml_type t) { return t == GGML_TYPE_F32 || t == GGML_TYPE_F16 || t == GGML_TYPE_BF16; }
 static bool is_deq_quant(ggml_type t) { return t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q8_0; }
 
-// GGML_TPU_QUANT=bf16 (default): block-quantized weights are dequantized to bf16 once, on upload.
-// GGML_TPU_QUANT=packed: they stay in ggml's block layout on the device and are dequantized in every program.
-static bool quant_as_bf16() {
-    static const bool v = [] {
+// How block-quantized weights (Q4_0, Q8_0) live on the device, GGML_TPU_QUANT:
+//   bf16 (default): dequantized to bf16 once, on upload (rounds most weights)
+//   int8:           two arrays, int8 codes and an f32 scale per 32-weight block; exact
+//   packed:         ggml's block bytes; dequantized exactly inside every program
+enum class QuantMode { BF16, INT8, PACKED };
+static QuantMode quant_mode() {
+    static const QuantMode m = [] {
         const char * e = getenv("GGML_TPU_QUANT");
-        return !(e && strcmp(e, "packed") == 0);
+        if (e && strcmp(e, "packed") == 0) return QuantMode::PACKED;
+        if (e && strcmp(e, "int8") == 0) return QuantMode::INT8;
+        return QuantMode::BF16;
     }();
-    return v;
+    return m;
 }
 
-bool converted_on_upload(const ggml_tensor * t) { return is_deq_quant(t->type) && quant_as_bf16(); }
+bool converted_on_upload(const ggml_tensor * t) { return is_deq_quant(t->type) && quant_mode() != QuantMode::PACKED; }
+static bool as_int8(const ggml_tensor * t) { return is_deq_quant(t->type) && quant_mode() == QuantMode::INT8; }
 
-void to_device_bytes(const ggml_tensor * t, const void * src, std::vector<uint8_t> & out) {
+int root_array_parts(const ggml_tensor * t) { return as_int8(t) ? 2 : 1; }
+
+void to_device_parts(const ggml_tensor * t, const void * src, std::vector<std::vector<uint8_t>> & out) {
     const int64_t n = ggml_nelements(t);
-    std::vector<float> f(n);
-    ggml_get_type_traits(t->type)->to_float(src, f.data(), n);
-    out.resize(n * sizeof(ggml_bf16_t));
-    ggml_fp32_to_bf16_row(f.data(), (ggml_bf16_t *) out.data(), n);
+    if (!as_int8(t)) {
+        std::vector<float> f(n);
+        ggml_get_type_traits(t->type)->to_float(src, f.data(), n);
+        out.assign(1, std::vector<uint8_t>(n * sizeof(ggml_bf16_t)));
+        ggml_fp32_to_bf16_row(f.data(), (ggml_bf16_t *) out[0].data(), n);
+        return;
+    }
+    // block layouts (ggml-common.h): Q4_0 = {f16 d; u8 qs[16]}, low nibbles are weights 0..15;
+    // Q8_0 = {f16 d; i8 qs[32]}
+    // written column-major per matrix: codes[i3][i2][k][m], scales[i3][i2][k/32][m]
+    const int64_t K = t->ne[0], M = t->ne[1], nmat = t->ne[2] * t->ne[3], nbk = K / 32;
+    const size_t bs = ggml_type_size(t->type);
+    out.assign(2, {});
+    out[0].resize(n);
+    out[1].resize(n / 32 * sizeof(float));
+    int8_t * codes = (int8_t *) out[0].data();
+    float * scales = (float *) out[1].data();
+    const uint8_t * p = (const uint8_t *) src;
+    int8_t c[32];
+    for (int64_t mat = 0; mat < nmat; mat++) {
+        int8_t * cm = codes + mat * K * M;
+        float * sm = scales + mat * nbk * M;
+        for (int64_t m = 0; m < M; m++) {
+            for (int64_t kb = 0; kb < nbk; kb++, p += bs) {
+                ggml_fp16_t d;
+                memcpy(&d, p, sizeof(d));
+                sm[kb * M + m] = ggml_fp16_to_fp32(d);
+                const uint8_t * qs = p + 2;
+                if (t->type == GGML_TYPE_Q4_0) {
+                    for (int j = 0; j < 16; j++) {
+                        c[j] = (int8_t) ((qs[j] & 0x0F) - 8);
+                        c[j + 16] = (int8_t) ((qs[j] >> 4) - 8);
+                    }
+                } else {
+                    memcpy(c, qs, 32);
+                }
+                for (int j = 0; j < 32; j++) cm[(kb * 32 + j) * M + m] = c[j];
+            }
+        }
+    }
 }
 
 static std::string et_of(ggml_type t) {
@@ -60,7 +104,19 @@ static std::string et_of(ggml_type t) {
 
 static Shape shape4(const ggml_tensor * t) { return {t->ne[3], t->ne[2], t->ne[1], t->ne[0]}; }
 
-void root_array_desc(const ggml_tensor * t, Shape & sh, std::string & et) {
+void root_array_desc(const ggml_tensor * t, int part, Shape & sh, std::string & et) {
+    if (as_int8(t)) {
+        // column-major (K before M): the layout the TPU's int8 matrix multiply wants, so XLA does not
+        // transpose every weight in every program
+        if (part == 0) {
+            sh = {t->ne[3], t->ne[2], t->ne[0], t->ne[1]};
+            et = "i8";
+        } else {
+            sh = {t->ne[3], t->ne[2], t->ne[0] / 32, t->ne[1]};
+            et = "f32";
+        }
+        return;
+    }
     if (converted_on_upload(t)) {
         sh = shape4(t);
         et = "bf16";
@@ -238,16 +294,70 @@ private:
     std::unordered_set<const ggml_tensor *>    written_set_;
     std::unordered_set<const ggml_tensor *>    computed_set_;
 
+    std::unordered_map<const ggml_tensor *, V> scaleval_;  // second array of int8-mode roots
+
     V rootvalue(const ggml_tensor * r) {
         auto it = rootval_.find(r);
         if (it != rootval_.end()) return it->second;
         Shape sh;
         std::string et;
-        root_array_desc(r, sh, et);
+        root_array_desc(r, 0, sh, et);
         V p = b_.param(sh, et);
         params_.push_back(r);
+        if (root_array_parts(r) == 2) {
+            // int8 mode: keep the column-major arrays for matmuls, expose row-major views otherwise
+            root_array_desc(r, 1, sh, et);
+            V sp = b_.param(sh, et);
+            colmajor_[r] = {p, sp};
+            scaleval_[r] = b_.transpose(sp, {0, 1, 3, 2});
+            p = b_.transpose(p, {0, 1, 3, 2});
+        }
         rootval_[r] = p;
         return p;
+    }
+
+    std::unordered_map<const ggml_tensor *, std::pair<V, V>> colmajor_;  // int8 roots: codes, scales [.., K|nb, M]
+
+    // whole int8-mode weight dequantized exactly, column-major [a3, a2, K, M] f32
+    V int8_weight_kxm(const ggml_tensor * R) {
+        rootvalue(R);
+        const V & q = colmajor_.at(R).first;
+        const V & sc = colmajor_.at(R).second;
+        const int64_t K = R->ne[0], M = R->ne[1], nb = K / 32;
+        Shape b5 = {R->ne[3], R->ne[2], nb, 32, M};
+        V c = b_.reshape(f32(q), b5);
+        V s5 = b_.bcast_to(b_.reshape(sc, {R->ne[3], R->ne[2], nb, 1, M}), b5);
+        return b_.reshape(b_.mul(c, s5), {R->ne[3], R->ne[2], K, M});
+    }
+
+    // per-block scales of an int8-mode tensor (or a row view of one), [ne3, ne2, ne1, ne0/32]
+    V scales_of(const ggml_tensor * t) {
+        const ggml_tensor * R = root_of(t);
+        rootvalue(R);
+        V S = scaleval_.at(R);
+        if (t == R) return S;
+        return row_view(S, R, t, R->ne[0] / 32);
+    }
+
+    // view of whole rows of a block-quantized root whose device array has row width w
+    V row_view(const V & rv, const ggml_tensor * R, const ggml_tensor * X, int64_t w) {
+        const int64_t rb = (int64_t) R->nb[1];
+        V flat = b_.reshape(rv, {ggml_nrows(R), w});
+        std::vector<Dim> dims;
+        for (int k = 1; k < 4; k++) dims.push_back({k, X->ne[k], (int64_t) X->nb[k] / rb});
+        V r = read_strided(flat, (int64_t) X->view_offs / rb, dims);
+        return b_.reshape(r, {X->ne[3], X->ne[2], X->ne[1], w});
+    }
+
+    // codes [.., K] (any int/float type) times per-block scales [.., K/32] -> f32 [.., K]
+    V apply_scales(const V & codes, const V & scales) {
+        Shape lead(codes.sh.begin(), codes.sh.end() - 1);
+        const int64_t K = codes.sh.back(), nb = K / 32;
+        Shape b3 = lead; b3.push_back(nb); b3.push_back(32);
+        Shape s3 = lead; s3.push_back(nb); s3.push_back(1);
+        V c = b_.reshape(f32(codes), b3);
+        V sc = b_.bcast_to(b_.reshape(scales, s3), b3);
+        return b_.reshape(b_.mul(c, sc), codes.sh);
     }
 
     V value(const ggml_tensor * t) {
@@ -466,14 +576,7 @@ private:
             return read_strided(flat, (int64_t) X->view_offs / esz, dims);
         }
         if (X == R) return rv;
-        const int64_t rb = (int64_t) R->nb[1];
-        const int64_t nrows = ggml_nrows(R);
-        const int64_t w = converted_on_upload(R) ? R->ne[0] : rb;
-        V flat = b_.reshape(rv, {nrows, w});
-        std::vector<Dim> dims;
-        for (int k = 1; k < 4; k++) dims.push_back({k, X->ne[k], (int64_t) X->nb[k] / rb});
-        V r = read_strided(flat, (int64_t) X->view_offs / rb, dims);
-        return b_.reshape(r, {X->ne[3], X->ne[2], X->ne[1], w});
+        return row_view(rv, R, X, converted_on_upload(R) ? R->ne[0] : (int64_t) R->nb[1]);
     }
 
     V write_layout(const V & rv, const ggml_tensor * R, const ggml_tensor * X, const V & v) {
@@ -580,6 +683,7 @@ private:
     // value of a float-or-quant tensor as f32 in shape4
     V f32_value(const ggml_tensor * t) {
         V v = value(t);
+        if (as_int8(t)) return apply_scales(v, scales_of(t));
         if (is_deq_quant(t->type) && !converted_on_upload(root_of(t))) return dequant(v, t->type, t->ne[0]);
         return f32(v);
     }
@@ -597,6 +701,47 @@ private:
 V Lowerer::op_mul_mat(const ggml_tensor * X) {
     const ggml_tensor * a = X->src[0];
     const ggml_tensor * bt = X->src[1];
+    static const bool blockwise = [] {
+        const char * e = getenv("GGML_TPU_INT8_MATMUL");
+        return e && strcmp(e, "blockwise") == 0;
+    }();
+    if (as_int8(a) && a == root_of(a) && blockwise) {
+        // y[n,m] = sum_b s[b,m] * sum_{j<32} q[32b+j, m] x[n, 32b+j]: convert the codes only, scale the partial sums
+        rootvalue(a);
+        const V & q = colmajor_.at(a).first;    // [a3, a2, K, M] i8
+        const V & sc = colmajor_.at(a).second;  // [a3, a2, nb, M] f32
+        const int64_t K = a->ne[0], M = a->ne[1], nb = K / 32;
+        const int64_t b3 = bt->ne[3], b2 = bt->ne[2], N = bt->ne[1];
+        const int64_t r2 = b2 / a->ne[2], r3 = b3 / a->ne[3];
+        const std::string cet = prec_ != "HIGHEST" ? "bf16" : "f32";
+        auto bb = [&](const V & v, int64_t d2) {
+            if (r2 == 1 && r3 == 1) return v;
+            V t = b_.broadcast_in_dim(v, {a->ne[3], r3, a->ne[2], r2, d2, M}, {0, 2, 4, 5});
+            return b_.reshape(t, {b3, b2, d2, M});
+        };
+        V Q = b_.convert(b_.reshape(bb(q, K), {b3, b2, nb, 32, M}), cet);
+        V S = bb(sc, nb);
+        V B = b_.convert(b_.reshape(f32(value(bt)), {b3, b2, N, nb, 32}), cet);
+        // batch (b3, b2, nb), contract the block's 32 weights -> [b3, b2, nb, N, M]
+        V part = b_.dot_general(B, Q, {0, 1, 3}, {0, 1, 2}, {4}, {3}, "f32", prec_.c_str());
+        V Sb = b_.broadcast_in_dim(S, {b3, b2, nb, N, M}, {0, 1, 2, 4});
+        return b_.reduce(b_.mul(part, Sb), {2}, "add");
+    }
+    if (as_int8(a) && a == root_of(a)) {
+        // whole int8-mode weight: use the column-major device arrays directly
+        V W = int8_weight_kxm(a);                                   // [a3, a2, K, M] f32
+        V B = f32(value(bt));                                       // [b3, b2, N, K]
+        const int64_t r2 = bt->ne[2] / a->ne[2], r3 = bt->ne[3] / a->ne[3];
+        if (r2 > 1 || r3 > 1) {
+            W = b_.broadcast_in_dim(W, {a->ne[3], r3, a->ne[2], r2, a->ne[0], a->ne[1]}, {0, 2, 4, 5});
+            W = b_.reshape(W, {bt->ne[3], bt->ne[2], a->ne[0], a->ne[1]});
+        }
+        if (prec_ != "HIGHEST") {
+            W = b_.convert(W, "bf16");
+            B = b_.convert(B, "bf16");
+        }
+        return b_.dot_general(B, W, {0, 1}, {0, 1}, {3}, {2}, "f32", prec_.c_str());
+    }
     // HIGHEST keeps everything in f32; otherwise feed the matrix unit bf16 operands with f32 accumulation
     const bool lowp = prec_ != "HIGHEST";
     V A = f32_value(a);   // [a3, a2, M, K]
@@ -706,6 +851,12 @@ V Lowerer::op_get_rows(const ggml_tensor * X) {
     const int64_t w = A.sh[3];
     Shape out = {ix->ne[2], ix->ne[1], ix->ne[0], w};
     V g = b_.gather(A, idx, out, {3}, {0, 1, 2}, {0, 1, 2}, 3, {1, 1, 1, w});
+    if (as_int8(a)) {
+        V S = scales_of(a);
+        const int64_t nb = S.sh[3];
+        V gs = b_.gather(S, idx, {ix->ne[2], ix->ne[1], ix->ne[0], nb}, {3}, {0, 1, 2}, {0, 1, 2}, 3, {1, 1, 1, nb});
+        return apply_scales(g, gs);
+    }
     if (is_deq_quant(a->type) && !converted_on_upload(root_of(a))) return dequant(g, a->type, a->ne[0]);
     return g;
 }
