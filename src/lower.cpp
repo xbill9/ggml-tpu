@@ -25,6 +25,26 @@ static bool is_plain(ggml_type t) {
 static bool is_float(ggml_type t) { return t == GGML_TYPE_F32 || t == GGML_TYPE_F16 || t == GGML_TYPE_BF16; }
 static bool is_deq_quant(ggml_type t) { return t == GGML_TYPE_Q4_0 || t == GGML_TYPE_Q8_0; }
 
+// GGML_TPU_QUANT=bf16 (default): block-quantized weights are dequantized to bf16 once, on upload.
+// GGML_TPU_QUANT=packed: they stay in ggml's block layout on the device and are dequantized in every program.
+static bool quant_as_bf16() {
+    static const bool v = [] {
+        const char * e = getenv("GGML_TPU_QUANT");
+        return !(e && strcmp(e, "packed") == 0);
+    }();
+    return v;
+}
+
+bool converted_on_upload(const ggml_tensor * t) { return is_deq_quant(t->type) && quant_as_bf16(); }
+
+void to_device_bytes(const ggml_tensor * t, const void * src, std::vector<uint8_t> & out) {
+    const int64_t n = ggml_nelements(t);
+    std::vector<float> f(n);
+    ggml_get_type_traits(t->type)->to_float(src, f.data(), n);
+    out.resize(n * sizeof(ggml_bf16_t));
+    ggml_fp32_to_bf16_row(f.data(), (ggml_bf16_t *) out.data(), n);
+}
+
 static std::string et_of(ggml_type t) {
     switch (t) {
         case GGML_TYPE_F32:  return "f32";
@@ -41,6 +61,11 @@ static std::string et_of(ggml_type t) {
 static Shape shape4(const ggml_tensor * t) { return {t->ne[3], t->ne[2], t->ne[1], t->ne[0]}; }
 
 void root_array_desc(const ggml_tensor * t, Shape & sh, std::string & et) {
+    if (converted_on_upload(t)) {
+        sh = shape4(t);
+        et = "bf16";
+        return;
+    }
     if (is_plain(t->type)) {
         sh = shape4(t);
         et = et_of(t->type);
@@ -443,11 +468,12 @@ private:
         if (X == R) return rv;
         const int64_t rb = (int64_t) R->nb[1];
         const int64_t nrows = ggml_nrows(R);
-        V flat = b_.reshape(rv, {nrows, rb});
+        const int64_t w = converted_on_upload(R) ? R->ne[0] : rb;
+        V flat = b_.reshape(rv, {nrows, w});
         std::vector<Dim> dims;
         for (int k = 1; k < 4; k++) dims.push_back({k, X->ne[k], (int64_t) X->nb[k] / rb});
         V r = read_strided(flat, (int64_t) X->view_offs / rb, dims);
-        return b_.reshape(r, {X->ne[3], X->ne[2], X->ne[1], rb});
+        return b_.reshape(r, {X->ne[3], X->ne[2], X->ne[1], w});
     }
 
     V write_layout(const V & rv, const ggml_tensor * R, const ggml_tensor * X, const V & v) {
@@ -554,7 +580,7 @@ private:
     // value of a float-or-quant tensor as f32 in shape4
     V f32_value(const ggml_tensor * t) {
         V v = value(t);
-        if (is_deq_quant(t->type)) return dequant(v, t->type, t->ne[0]);
+        if (is_deq_quant(t->type) && !converted_on_upload(root_of(t))) return dequant(v, t->type, t->ne[0]);
         return f32(v);
     }
 
@@ -571,8 +597,14 @@ private:
 V Lowerer::op_mul_mat(const ggml_tensor * X) {
     const ggml_tensor * a = X->src[0];
     const ggml_tensor * bt = X->src[1];
+    // HIGHEST keeps everything in f32; otherwise feed the matrix unit bf16 operands with f32 accumulation
+    const bool lowp = prec_ != "HIGHEST";
     V A = f32_value(a);   // [a3, a2, M, K]
     V B = f32(value(bt));  // [b3, b2, N, K]
+    if (lowp) {
+        A = b_.convert(A, "bf16");
+        B = b_.convert(B, "bf16");
+    }
     const int64_t r2 = bt->ne[2] / a->ne[2], r3 = bt->ne[3] / a->ne[3];
     if (r2 > 1 || r3 > 1) {
         Shape inter = {a->ne[3], r3, a->ne[2], r2, a->ne[1], a->ne[0]};
@@ -674,7 +706,7 @@ V Lowerer::op_get_rows(const ggml_tensor * X) {
     const int64_t w = A.sh[3];
     Shape out = {ix->ne[2], ix->ne[1], ix->ne[0], w};
     V g = b_.gather(A, idx, out, {3}, {0, 1, 2}, {0, 1, 2}, 3, {1, 1, 1, w});
-    if (is_deq_quant(a->type)) return dequant(g, a->type, a->ne[0]);
+    if (is_deq_quant(a->type) && !converted_on_upload(root_of(a))) return dequant(g, a->type, a->ne[0]);
     return g;
 }
 

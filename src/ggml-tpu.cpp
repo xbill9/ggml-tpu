@@ -138,7 +138,14 @@ struct Buffer {
         }
         sync_to_host(off, size);
         drop(off, size);
-        Handle h = executor()->upload(host + off, size, et, sh);
+        Handle h;
+        if (converted_on_upload(R)) {
+            std::vector<uint8_t> conv;
+            to_device_bytes(R, host + off, conv);
+            h = executor()->upload(conv.data(), conv.size(), et, sh);
+        } else {
+            h = executor()->upload(host + off, size, et, sh);
+        }
         entries[off] = Entry{size, et, sh, h, false};
         return h;
     }
@@ -258,10 +265,53 @@ static ggml_backend_buffer_type_t buffer_type() {
 // ---------------------------------------------------------------------------------------------
 // backend (stream)
 
+// Everything the lowering reads from a graph, so equal fingerprints lower to the same program
+// with the same parameter and output tensors.
+static void fp_tensor(std::string & k, const ggml_tensor * t) {
+    auto put = [&](const void * p, size_t n) { k.append((const char *) p, n); };
+    put(&t, sizeof(t));
+    put(&t->type, sizeof(t->type));
+    put(&t->op, sizeof(t->op));
+    put(&t->flags, sizeof(t->flags));
+    put(t->ne, sizeof(t->ne));
+    put(t->nb, sizeof(t->nb));
+    put(&t->view_src, sizeof(t->view_src));
+    put(&t->view_offs, sizeof(t->view_offs));
+    put(&t->data, sizeof(t->data));
+    put(&t->buffer, sizeof(t->buffer));
+    put(t->op_params, sizeof(t->op_params));
+    for (int i = 0; i < GGML_MAX_SRC; i++) put(&t->src[i], sizeof(t->src[i]));
+}
+
+static std::string fingerprint(const ggml_cgraph * g, bool mat_all) {
+    std::string k;
+    k.reserve(1 << 18);
+    k.push_back(mat_all ? 1 : 0);
+    const int n = ggml_graph_n_nodes(const_cast<ggml_cgraph *>(g));
+    for (int i = 0; i < n; i++) {
+        const ggml_tensor * t = ggml_graph_node(const_cast<ggml_cgraph *>(g), i);
+        fp_tensor(k, t);
+        for (int s = 0; s < GGML_MAX_SRC; s++) {
+            if (t->src[s]) fp_tensor(k, t->src[s]);
+        }
+        if (t->view_src) fp_tensor(k, t->view_src);
+    }
+    return k;
+}
+
+struct Compiled {
+    Lowered L;
+    Program p;
+};
+
 struct Backend {
+    std::unordered_map<std::string, std::shared_ptr<Compiled>> by_graph;  // graph fingerprint -> program
     std::unordered_map<std::string, Program> programs;
     size_t n_compiles = 0;
     double compile_s = 0;
+    // per-phase wall time, seconds
+    double t_lower = 0, t_lookup = 0, t_args = 0, t_exec = 0, t_out = 0;
+    size_t n_runs = 0;
 };
 
 static const char * be_name(ggml_backend_t) { return "TPU"; }
@@ -270,6 +320,11 @@ static void be_free(ggml_backend_t backend) {
     Backend * be = (Backend *) backend->context;
     if (verbosity() > 0) {
         GGML_LOG_INFO("ggml-tpu: %zu programs compiled in %.1f s\n", be->n_compiles, be->compile_s);
+        if (be->n_runs) {
+            const double k = 1e3 / be->n_runs;
+            GGML_LOG_INFO("ggml-tpu: %zu runs, ms per run: lower %.2f, program lookup %.2f, inputs %.2f, execute %.2f, outputs %.2f\n",
+                          be->n_runs, be->t_lower * k, be->t_lookup * k, be->t_args * k, be->t_exec * k, be->t_out * k);
+        }
     }
     delete be;
     delete backend;
@@ -287,45 +342,65 @@ static void dump(const std::string & text, const char * tag) {
 static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     Backend * be = (Backend *) backend->context;
     Executor * ex = executor();
+    using clk = std::chrono::steady_clock;
+    auto secs = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); };
     try {
-        Lowered L = lower_graph(cgraph, env_flag("GGML_TPU_MATERIALIZE_ALL"));
-        if (L.outputs.empty()) return GGML_STATUS_SUCCESS;
-
-        Program p;
-        auto it = be->programs.find(L.mlir);
-        if (it != be->programs.end()) {
-            p = it->second;
+        auto t0 = clk::now();
+        const bool mat_all = env_flag("GGML_TPU_MATERIALIZE_ALL");
+        std::string key = fingerprint(cgraph, mat_all);
+        std::shared_ptr<Compiled> C;
+        auto git = be->by_graph.find(key);
+        if (git != be->by_graph.end()) {
+            C = git->second;
         } else {
-            if (verbosity() > 1) dump(L.mlir, "graph");
-            auto t0 = std::chrono::steady_clock::now();
-            try {
-                p = ex->compile(L.mlir);
-            } catch (...) {
-                if (verbosity() <= 1) {
-                    const char * dir = getenv("GGML_TPU_DUMP_DIR");
-                    if (dir) dump(L.mlir, "failed");
-                }
-                throw;
-            }
-            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            be->programs.emplace(L.mlir, p);
-            be->n_compiles++;
-            be->compile_s += s;
-            if (verbosity() > 0) {
-                GGML_LOG_INFO("ggml-tpu: compiled program %zu (%d nodes, %zu inputs, %zu outputs, %zu bytes) in %.2f s\n",
-                              be->n_compiles, ggml_graph_n_nodes(cgraph), L.params.size(), L.outputs.size(),
-                              L.mlir.size(), s);
-            }
+            C = std::make_shared<Compiled>();
+            C->L = lower_graph(cgraph, mat_all);
+            C->p = nullptr;
         }
+        const Lowered & L = C->L;
+        if (L.outputs.empty()) {
+            be->by_graph.emplace(std::move(key), C);
+            return GGML_STATUS_SUCCESS;
+        }
+        auto t1 = clk::now();
 
+        if (!C->p) {
+            auto it = be->programs.find(L.mlir);
+            if (it != be->programs.end()) {
+                C->p = it->second;
+            } else {
+                if (verbosity() > 1) dump(L.mlir, "graph");
+                auto c0 = std::chrono::steady_clock::now();
+                try {
+                    C->p = ex->compile(L.mlir);
+                } catch (...) {
+                    if (verbosity() <= 1 && getenv("GGML_TPU_DUMP_DIR")) dump(L.mlir, "failed");
+                    throw;
+                }
+                const double cs = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
+                be->programs.emplace(L.mlir, C->p);
+                be->n_compiles++;
+                be->compile_s += cs;
+                if (verbosity() > 0) {
+                    GGML_LOG_INFO("ggml-tpu: compiled program %zu (%d nodes, %zu inputs, %zu outputs, %zu bytes) in %.2f s\n",
+                                  be->n_compiles, ggml_graph_n_nodes(cgraph), L.params.size(), L.outputs.size(),
+                                  L.mlir.size(), cs);
+                }
+            }
+            be->by_graph.emplace(std::move(key), C);
+        }
+        Program p = C->p;
+        auto t2 = clk::now();
         std::vector<Handle> args;
         args.reserve(L.params.size());
         for (const ggml_tensor * R : L.params) {
             GGML_ASSERT(R->buffer && R->buffer->buft == buffer_type());
             args.push_back(((Buffer *) R->buffer->context)->array_for(R));
         }
+        auto t3 = clk::now();
         std::vector<Handle> outs = ex->execute(p, args);
         GGML_ASSERT(outs.size() == L.outputs.size());
+        auto t4 = clk::now();
         // dropped intermediates may share memory with outputs: poison first, then let outputs win
         for (const ggml_tensor * R : L.dropped) {
             if (R->buffer && R->buffer->buft == buffer_type()) ((Buffer *) R->buffer->context)->poison(R);
@@ -334,6 +409,13 @@ static ggml_status be_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph
             const ggml_tensor * R = L.outputs[i];
             ((Buffer *) R->buffer->context)->set_output(R, outs[i]);
         }
+        auto t5 = clk::now();
+        be->t_lower += secs(t0, t1);
+        be->t_lookup += secs(t1, t2);
+        be->t_args += secs(t2, t3);
+        be->t_exec += secs(t3, t4);
+        be->t_out += secs(t4, t5);
+        be->n_runs++;
     } catch (const std::exception & e) {
         GGML_LOG_ERROR("ggml-tpu: graph compute failed: %s\n", e.what());
         return GGML_STATUS_FAILED;

@@ -4,6 +4,7 @@
 #include "ggml.h"
 #include "hlo.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,10 @@ namespace tpu {
 // Plain types: [ne3, ne2, ne1, ne0] of the element type.
 // Block-quantized types: [ne3, ne2, ne1, row_bytes] of ui8.
 void root_array_desc(const ggml_tensor * t, hlo::Shape & sh, std::string & et);
+
+// Block-quantized roots that are converted on the host before upload (see GGML_TPU_QUANT).
+bool converted_on_upload(const ggml_tensor * t);
+void to_device_bytes(const ggml_tensor * t, const void * src, std::vector<uint8_t> & out);
 
 bool supports_op(const ggml_tensor * op);
 

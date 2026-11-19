@@ -52,9 +52,14 @@ def download(arr, mv):
 def compile(text):
     return _be.compile_and_load(text, xc.DeviceList((_dev,)), xc.CompileOptions())
 
+_sync = os.environ.get("GGML_TPU_SYNC", "0") not in ("", "0")
+
 def execute(exe, args):
     res = exe.execute_sharded(list(args))
-    return [o[0] for o in res.disassemble_into_single_device_arrays()]
+    outs = [o[0] for o in res.disassemble_into_single_device_arrays()]
+    if _sync:
+        jax.block_until_ready(outs)
+    return outs
 )PY";
 
 class JaxExecutor : public Executor {
