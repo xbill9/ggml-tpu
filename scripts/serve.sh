@@ -2,7 +2,7 @@
 # On a TPU VM: serve Gemma 4 E2B through llama-server on the ggml-tpu backend (OpenAI-compatible, port 8090).
 # Fetches the exact Q4_0 GGUF on first use and checks it by SHA-256. Run scripts/setup-tpu-vm.sh first.
 # usage: bash ~/ggml-tpu/scripts/serve.sh            (foreground; logs to stdout)
-# env:   PORT (8090), CTX (8192), GGML_TPU_EXECUTOR (pjrt), GGML_TPU_QUANT (bf16), GGML_TPU_PRECISION (DEFAULT)
+# env:   VERIFY=1 (re-hash the model), PORT (8090), CTX (8192), GGML_TPU_EXECUTOR (pjrt), GGML_TPU_QUANT (bf16), GGML_TPU_PRECISION (DEFAULT)
 set -euo pipefail
 B=~/llama.cpp/build-tpu/bin
 M=~/models/gemma-4-E2B-it-q4_0-exact.gguf
@@ -22,10 +22,12 @@ if [ ! -x $B/llama-server ]; then
         || { tail -20 ~/server-build.log; exit 1; }
 fi
 
+# Hash only after a download (or with VERIFY=1): hashing the 2.6 GB file takes 10.6 s on a v5e-1 host.
 if [ ! -f "$M" ]; then
     python3 -c "from huggingface_hub import hf_hub_download as d; d('xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf', 'gemma-4-E2B-it-q4_0-exact.gguf', local_dir='$HOME/models')"
+    VERIFY=1
 fi
-echo "$SHA  $M" | sha256sum -c - || exit 1
+if [ -n "${VERIFY:-}" ]; then echo "$SHA  $M" | sha256sum -c - || exit 1; fi
 
 exec $B/llama-server -m "$M" -dev TPU0 -ngl 99 -fa off -c "${CTX:-8192}" \
     --host 127.0.0.1 --port "${PORT:-8090}" --parallel 1 --metrics --jinja \

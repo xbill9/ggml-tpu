@@ -132,6 +132,7 @@ PAGE = r"""<!doctype html>
     <input type="range" id="temp" min="-0.1" max="1.5" step="0.1" value="-0.1">
     <label class="ctl" for="topk">Top-k: <span id="topkVal">off</span></label>
     <input type="range" id="topk" min="0" max="128" step="8" value="0">
+    <label class="ctl"><input type="checkbox" id="think" checked> Thinking (Gemma 4 reasons before answering)</label>
     <label class="ctl" for="system">System prompt (optional)</label>
     <textarea id="system" placeholder="e.g. Answer in one short paragraph."></textarea>
     <h3>Last reply</h3>
@@ -261,6 +262,7 @@ async function submit() {
   const body = { model, messages, stream: true, max_tokens: +$("maxTokens").value, stream_options: { include_usage: true } };
   if (+$("temp").value >= 0) body.temperature = +$("temp").value;
   if (+$("topk").value) body.top_k = +$("topk").value;
+  body.chat_template_kwargs = { enable_thinking: $("think").checked };
   const t0 = performance.now(); let ttft = null, reply = "", reasoning = "", usage = null, finish = null, timings = null;
   try {
     const r = await fetch("/v1/chat/completions", {
