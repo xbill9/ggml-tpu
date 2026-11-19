@@ -30,7 +30,9 @@ cd ~/ggml-tpu && cmake -S . -B build -DLLAMA_CPP_DIR=$HOME/llama.cpp -DLLAMA_CPP
 ## TPU
 
 - The `pjrt` executor has no CPU plugin: anything touching `src/exec_pjrt.cpp` must be tested on a real TPU. Get or find one with the `tpu-management` skill (measured rig: v5e, v5litepod-1, flex-start). TPUs cost money — don't provision one without asking.
-- Code reaches the VM by commit + push to `main`, then `git pull` in `~/ggml-tpu` on the VM. First time: clone to `~/ggml-tpu`, then `bash ~/ggml-tpu/scripts/setup-tpu-vm.sh`.
+- Code reaches the VM by commit + push to `main`, then a git bundle: the repo is private and the VM has no GitHub credentials. `git bundle create b.bundle main`, `gcloud compute tpus tpu-vm scp b.bundle <node>:~/ggml-tpu.bundle ...`, then on the VM `git -C ~/ggml-tpu pull ~/ggml-tpu.bundle main` (first time: `git clone -b main ~/ggml-tpu.bundle ~/ggml-tpu`, then `bash ~/ggml-tpu/scripts/setup-tpu-vm.sh`).
+- Serve: `scripts/serve.sh` on the VM (llama-server, OpenAI API on 127.0.0.1:8090). Chat from here: `scripts/chat.sh` (SSH tunnel + `ui/chat_ui.py` on http://localhost:8765; `TPU_NODE`/`TPU_ZONE`/`TPU_PROJECT` pick the VM).
+- If a local `llama-server` build fails in the UI asset step, delete `~/llama.cpp/build-tpu/tools/ui/dist` (stale assets) and rebuild.
 - On the VM, `libtpu.so` is at `~/.local/lib/python3.10/site-packages/libtpu/libtpu.so` (pass via `GGML_TPU_LIBTPU`). Benchmarks use `GGML_TPU_PRECISION=DEFAULT`, `llama-bench -ngl 99 -fa 0`, 3 repetitions.
 
 ## Conventions

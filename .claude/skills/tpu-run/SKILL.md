@@ -9,8 +9,9 @@ Run ggml-tpu on a real TPU. `$ARGUMENTS` = what to run: `ops [OP...]`, `compare`
 1. **Push.** Working tree must be committed; `git push origin main`. Note the commit SHA.
 2. **TPU.** Use the `tpu-management` skill to find an existing ggml-tpu VM, or — after confirming cost with the user — request one (the measured rig is v5e, v5litepod-1, flex-start). Record the TPU type and zone.
 3. **Sync and build on the VM** (over the ssh method tpu-management gives):
-   - First time: clone the repo to `~/ggml-tpu`, then `bash ~/ggml-tpu/scripts/setup-tpu-vm.sh` (llama.cpp pinned to `7182ef71e`).
-   - Otherwise: `cd ~/ggml-tpu && git pull && cmake --build build -j`. Confirm `git rev-parse HEAD` matches step 1.
+   The repo is private: ship it as a git bundle (`git bundle create <scratch>/ggml-tpu.bundle main`, then `gcloud compute tpus tpu-vm scp` it to `~/ggml-tpu.bundle`).
+   - First time: `git clone -b main ~/ggml-tpu.bundle ~/ggml-tpu`, then `bash ~/ggml-tpu/scripts/setup-tpu-vm.sh` (llama.cpp pinned to `7182ef71e`; about 3.5 min).
+   - Otherwise: `cd ~/ggml-tpu && git pull ~/ggml-tpu.bundle main && cmake --build build -j`. Confirm `git rev-parse HEAD` matches step 1.
 4. **Environment on the VM:**
    ```bash
    export GGML_BACKEND_PATH=$HOME/ggml-tpu/build/libggml-tpu.so GGML_TPU_EXECUTOR=pjrt \

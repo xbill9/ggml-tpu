@@ -219,7 +219,6 @@ async function status() {
   } catch { $("dot").className = "dot bad"; $("badgeText").textContent = "proxy not answering"; return false; }
 }
 
-const fmtPct = (x) => x == null ? null : (100 * x).toFixed(1) + " %";
 async function info() {
   try {
     const e = await (await fetch("/ui/info")).json();
@@ -240,9 +239,8 @@ async function info() {
       ["upstream", e.upstream],
     ]);
     setDL("load", [
-      ["processing", l.processing], ["deferred", l.deferred], ["KV cache used", fmtPct(l.kv_cache_usage)],
-      ["prompt tokens", l.prompt_tokens], ["generated tokens", l.generation_tokens],
-      ["server decode (avg)", l.predicted_per_second ? l.predicted_per_second.toFixed(1) + " tok/s" : null],
+      ["processing", l.processing], ["deferred", l.deferred],
+      ["prompt tokens", l.prompt_tokens], ["cached prompt tokens", l.cached_prompt_tokens], ["generated tokens", l.generation_tokens],
     ]);
   } catch { setDL("engine", []); setDL("load", []); }
 }
@@ -419,13 +417,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             info["load"] = {
                 "processing": metric_sum(m, "llamacpp:requests_processing"),
                 "deferred": metric_sum(m, "llamacpp:requests_deferred"),
-                "kv_cache_usage": metric_sum(m, "llamacpp:kv_cache_usage_ratio"),
+                "cached_prompt_tokens": metric_sum(m, "llamacpp:prompt_tokens_cached_total"),
                 "prompt_tokens": metric_sum(m, "llamacpp:prompt_tokens_total"),
                 "generation_tokens": metric_sum(m, "llamacpp:tokens_predicted_total"),
-                "predicted_per_second": metric_sum(m, "llamacpp:predicted_tokens_seconds"),
             }
             for k, v in info["load"].items():
-                if isinstance(v, float) and v.is_integer() and k not in ("kv_cache_usage", "predicted_per_second"):
+                if isinstance(v, float) and v.is_integer():
                     info["load"][k] = int(v)
         return info
 
