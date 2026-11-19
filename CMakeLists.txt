@@ -12,6 +12,7 @@ set(LLAMA_CPP_DIR "$ENV{HOME}/llama.cpp" CACHE PATH "llama.cpp source tree")
 set(LLAMA_CPP_BUILD "${LLAMA_CPP_DIR}/build-tpu" CACHE PATH "llama.cpp build tree (BUILD_SHARED_LIBS=ON)")
 set(PYTHON_EXE "python3" CACHE STRING "Python interpreter: embedded by the JAX executor, and used at build time to generate compile options")
 option(GGML_TPU_JAX "build the JAX executor (embeds Python)" ON)
+set(GGML_TPU_RPATH "${LLAMA_CPP_BUILD}/bin" CACHE STRING "where libggml-tpu.so finds libggml-base ($ORIGIN for a relocatable build)")
 
 find_library(GGML_BASE_LIB ggml-base PATHS "${LLAMA_CPP_BUILD}/bin" NO_DEFAULT_PATH REQUIRED)
 
@@ -38,7 +39,7 @@ target_include_directories(ggml-tpu PRIVATE
     "${LLAMA_CPP_DIR}/ggml/src")
 target_compile_definitions(ggml-tpu PRIVATE GGML_BACKEND_DL GGML_BACKEND_BUILD GGML_BACKEND_SHARED GGML_SHARED)
 target_link_libraries(ggml-tpu PRIVATE "${GGML_BASE_LIB}" ${CMAKE_DL_LIBS})
-set_target_properties(ggml-tpu PROPERTIES BUILD_RPATH "${LLAMA_CPP_BUILD}/bin")
+set_target_properties(ggml-tpu PROPERTIES BUILD_RPATH "${GGML_TPU_RPATH}")
 
 if (GGML_TPU_JAX)
     execute_process(COMMAND ${PYTHON_EXE} -c "import sysconfig,sys;print(sysconfig.get_paths()['include']);print(sysconfig.get_config_var('LIBDIR'));print(sysconfig.get_config_var('LDLIBRARY'));print(sys.base_prefix)"
@@ -54,7 +55,7 @@ if (GGML_TPU_JAX)
         GGML_TPU_PYTHON_HOME="${PY_HOME}"
         GGML_TPU_PYTHON_LIB="${PY_LIBDIR}/${PY_LDLIBRARY}")
     target_link_libraries(ggml-tpu PRIVATE "${PY_LIBDIR}/${PY_LDLIBRARY}")
-    set_target_properties(ggml-tpu PROPERTIES BUILD_RPATH "${PY_LIBDIR};${LLAMA_CPP_BUILD}/bin")
+    set_target_properties(ggml-tpu PROPERTIES BUILD_RPATH "${PY_LIBDIR};${GGML_TPU_RPATH}")
 endif()
 
 # tpu-compare: CPU vs TPU logits on one model

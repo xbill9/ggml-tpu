@@ -19,12 +19,13 @@ cmake -S "$W/llama.cpp" -B "$W/llama.cpp/build" -DCMAKE_BUILD_TYPE=Release -DBUI
 cmake --build "$W/llama.cpp/build" -j "$(nproc)" --target llama-server > "$W/llama.log" 2>&1 || { tail -20 "$W/llama.log"; exit 1; }
 
 cmake -S "$SRC" -B "$W/tpu" -DGGML_TPU_JAX=OFF -DLLAMA_CPP_DIR="$W/llama.cpp" -DLLAMA_CPP_BUILD="$W/llama.cpp/build" \
-      -DCMAKE_BUILD_RPATH='$ORIGIN' > /dev/null
+      -DGGML_TPU_RPATH='$ORIGIN' > /dev/null
 cmake --build "$W/tpu" -j "$(nproc)" --target ggml-tpu > "$W/tpu.log" 2>&1 || { tail -20 "$W/tpu.log"; exit 1; }
 
 mkdir -p "$W/$NAME"
 cp "$W/llama.cpp/build/bin/llama-server" "$W/$NAME/"
 cp -P "$W"/llama.cpp/build/bin/*.so* "$W/$NAME/"
+readelf -d "$W/tpu/libggml-tpu.so" | grep -q 'RUNPATH.*\[\$ORIGIN\]' || { echo "libggml-tpu.so RUNPATH is not \$ORIGIN"; exit 1; }
 cp "$W/tpu/libggml-tpu.so" "$W/$NAME/"
 cp "$SRC/ui/chat_ui.py" "$W/$NAME/"
 printf 'ggml-tpu %s\nllama.cpp %s\nbuilt %s on %s\n' "$(git -C "$SRC" rev-parse HEAD)" \
