@@ -126,15 +126,8 @@ PAGE = r"""<!doctype html>
   </main>
   <aside>
     <h3>Settings</h3>
-    <label class="ctl" for="maxTokens">Max tokens: <span id="maxTokensVal">2048</span></label>
-    <input type="range" id="maxTokens" min="16" max="4096" step="16" value="2048">
-    <label class="ctl" for="temp">Temperature: <span id="tempVal">server default</span></label>
-    <input type="range" id="temp" min="-0.1" max="1.5" step="0.1" value="-0.1">
-    <label class="ctl" for="topk">Top-k: <span id="topkVal">off</span></label>
-    <input type="range" id="topk" min="0" max="128" step="8" value="0">
-    <label class="ctl"><input type="checkbox" id="think" checked> Thinking (Gemma 4 reasons before answering)</label>
-    <label class="ctl" for="system">System prompt (optional)</label>
-    <textarea id="system" placeholder="e.g. Answer in one short paragraph."></textarea>
+    <label class="ctl"><input type="checkbox" id="think"> Thinking: the model reasons first, so replies take longer</label>
+    <div class="note">Replies stop at 2,048 tokens.</div>
     <h3>Last reply</h3>
     <dl id="last"><dt>—</dt><dd>nothing yet</dd></dl>
     <h3>On the TPU</h3>
@@ -257,12 +250,9 @@ async function submit() {
   const think = bubble.querySelector(".think"), thinkBody = think.querySelector("div"), answer = bubble.querySelector(".answer");
   bubble.classList.add("cursor");
   send.textContent = "Stop"; controller = new AbortController();
-  const sys = $("system").value.trim();
-  const messages = (sys ? [{ role: "system", content: sys }] : []).concat(history);
-  const body = { model, messages, stream: true, max_tokens: +$("maxTokens").value, stream_options: { include_usage: true } };
-  if (+$("temp").value >= 0) body.temperature = +$("temp").value;
-  if (+$("topk").value) body.top_k = +$("topk").value;
-  body.chat_template_kwargs = { enable_thinking: $("think").checked };
+  // Fixed settings: 2,048 tokens per reply, the server's sampling defaults, thinking from the one switch.
+  const body = { model, messages: history, stream: true, max_tokens: 2048, stream_options: { include_usage: true },
+                 chat_template_kwargs: { enable_thinking: $("think").checked } };
   const t0 = performance.now(); let ttft = null, reply = "", reasoning = "", usage = null, finish = null, timings = null;
   try {
     const r = await fetch("/v1/chat/completions", {
@@ -299,8 +289,8 @@ async function submit() {
   }
   bubble.classList.remove("cursor");
   if (!reply && reasoning && finish === "length")
-    answer.innerHTML = render("**No answer:** the reply reached Max tokens while Gemma was still reasoning. " +
-                              "Raise Max tokens, or turn Thinking off, and send it again.");
+    answer.innerHTML = render("**No answer:** the reply reached 2,048 tokens while Gemma was still reasoning. " +
+                              "Turn Thinking off, or ask for something shorter.");
   const total = (performance.now() - t0) / 1000;
   const n = usage ? usage.completion_tokens : null;
   const rate = n && n > 1 && ttft !== null && total > ttft ? (n - 1) / (total - ttft) : null;
@@ -324,9 +314,6 @@ input.addEventListener("input", autosize);
 input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("form").requestSubmit(); } });
 $("form").addEventListener("submit", (e) => { e.preventDefault(); if (controller) controller.abort(); else submit(); });
 $("clear").onclick = () => { if (controller) controller.abort(); location.reload(); };
-$("maxTokens").oninput = (e) => { $("maxTokensVal").textContent = e.target.value; };
-$("topk").oninput = (e) => { $("topkVal").textContent = +e.target.value ? e.target.value : "off"; };
-$("temp").oninput =(e) => { $("tempVal").textContent = +e.target.value < 0 ? "server default" : (+e.target.value).toFixed(1); };
 
 status().then((ok) => { if (ok) info(); });
 setInterval(async () => { if (await status() && !controller) info(); }, 15000);
