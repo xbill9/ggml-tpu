@@ -6,11 +6,11 @@ tags: tpu, llamacpp, gemma, googlecloud
 cover_image: https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/devto-cover.71c7edf3.jpg
 ---
 
-This article provides a step by step guide to running an unmodified llama.cpp on a Google Cloud TPU. An unofficial ggml backend, `ggml-tpu`, turns each llama.cpp graph into one XLA program and runs it on the chip through `libtpu`, so `llama-server`, `llama-bench` and every other llama.cpp tool use the TPU as device `TPU0`.
+This article provides a step by step guide to running llama.cpp on a Google Cloud TPU. An unofficial ggml backend, `ggml-tpu`, turns each llama.cpp graph into one XLA program and runs it on the chip through `libtpu`, so `llama-server`, `llama-bench` and every other llama.cpp tool use the TPU as device `TPU0`.
 
 https://github.com/xbill9/ggml-tpu
 
-**Unofficial.** `ggml-tpu` is an independent, out-of-tree project, separate from ggml-org/llama.cpp and from Google, which neither made nor endorses it. It needs no changes to llama.cpp.
+**Unofficial.** `ggml-tpu` is an independent, out-of-tree project, separate from ggml-org/llama.cpp and from Google, which neither made nor endorses it. The backend builds against an unchanged llama.cpp; the prebuilt release adds one 11-line patch so that a chat never waits for a compile (see the Tip after Step 5).
 
 **Gemma 4 E2B decodes at 122.56 tokens per second on one TPU v5e chip, and at 129.42 to 151.67 with Google's QAT drafter.** One Cloud TPU v5e-1, 2026-11-19:
 
@@ -104,13 +104,13 @@ jax 0.6.2 libtpu 0.0.17 [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_o
 llama.cpp 7182ef71e
 ```
 
-To skip the build, [release v0.1.0](https://github.com/xbill9/ggml-tpu/releases/tag/v0.1.0) has `llama-server`, its libraries and `libggml-tpu.so` in one tarball, built with portable CPU code. Every binary finds its libraries next to itself:
+To skip the build, [release v0.2.0](https://github.com/xbill9/ggml-tpu/releases/tag/v0.2.0) has `llama-server`, its libraries and `libggml-tpu.so` in one tarball, built with portable CPU code on a Colab TPU runtime. Every binary finds its libraries next to itself:
 
 ```bash
-tar xzf ggml-tpu-a4a425d-llama.cpp-7182ef71e-linux-x86_64.tar.gz
-cd ggml-tpu-a4a425d-llama.cpp-7182ef71e-linux-x86_64
-GGML_BACKEND_PATH=$PWD/libggml-tpu.so GGML_TPU_LIBTPU=/path/to/libtpu.so \
-  ./llama-server -m model.gguf -dev TPU0 -ngl 99 -fa off --jinja
+tar xzf ggml-tpu-98107ca-llama.cpp-7182ef71e-linux-x86_64.tar.gz
+cd ggml-tpu-98107ca-llama.cpp-7182ef71e-linux-x86_64
+LLAMA_KV_FULL=1 GGML_BACKEND_PATH=$PWD/libggml-tpu.so GGML_TPU_LIBTPU=/path/to/libtpu.so \
+  ./llama-server -m model.gguf -dev TPU0 -ngl 99 -fa off -ub 1 -c 8192 --jinja
 ```
 
 ---
@@ -186,7 +186,7 @@ That run uses the default weight format, which converts Q4_0 to bf16 on upload f
 
 ---
 
-#### 🔎 Tip: Each New Shape Compiles Once
+#### 🔎 Tip: One Shape, One Compile
 
 XLA compiles one program per graph shape. A chat produces new shapes in two ways: every new prompt length, and every 256 tokens of context, the step by which llama.cpp grows its attention window. The first reply that crosses one pays for a compile:
 
@@ -201,7 +201,14 @@ prompt 5 tok 25 ms; decode 348 tok 112.3 tok/s
 prompt 5 tok 25 ms; decode 281 tok 112.2 tok/s
 ```
 
-Compiled programs live for the life of the server process, so a server that has answered a few chats answers at full speed.
+Two settings remove both sources. `-ub 1` feeds prompts one token per step, so every step has the decode shape. `LLAMA_KV_FULL=1`, from the release's patch to llama.cpp ([`scripts/llama.cpp-kv-full.patch`](https://github.com/xbill9/ggml-tpu/blob/main/scripts/llama.cpp-kv-full.patch)), keeps the attention window at the whole context. The server then compiles its one program in its own start-up warm-up. The same binary on a Colab v5e-1, eight chat turns with the history resent each turn, `-c 8192`, 2026-11-22:
+
+| Setting | Seconds per turn | Decode |
+| :--- | ---: | ---: |
+| `LLAMA_KV_FULL=1`, `-ub 1` | 0.2 to 9.6 | 104.2 to 108.5 tok/s |
+| Defaults | 6.4 to 73.5 | 19.1 to 108.9 tok/s |
+
+With `-ub 1` prompts read at 325.3 to 499.0 tokens per second, against 7641.86 for a 512-token batch. The longest prompt in those turns, 1,025 tokens, took 2054.25 ms.
 
 ---
 
@@ -258,29 +265,24 @@ With `-ngl` below the layer count, llama.cpp keeps some layers and their KV cach
 [`llamacpp_tpu_gemma4_e2b_v5e1`](https://colab.research.google.com/github/xbill9/colab/blob/main/notebooks/llamacpp_tpu_gemma4_e2b_v5e1.ipynb) does Steps 2, 5 and 6 in three cells on a Colab v5e-1 runtime:
 
 1. **Download** the release tarball, check its SHA-256, and start the model download in the background.
-2. **Serve:** start `llama-server` on `TPU0` with the runtime's own `libtpu`, then the chat page in the notebook.
+2. **Serve:** start `llama-server` on `TPU0` with the runtime's own `libtpu`, `LLAMA_KV_FULL=1` and `-ub 1`, then the chat page in the notebook.
 3. **Use it:** one request through the OpenAI-compatible endpoint.
 
-The notebook never imports JAX: only one process can hold the TPU, and it has to be `llama-server`. Its three code cells, run as one script on the TPU VM from an empty directory:
+The notebook never imports JAX: only one process can hold the TPU, and it has to be `llama-server`. On a hosted Colab v5e-1, 2026-11-22:
 
 ```text
+libtpu  0.0.50
+jax     0.11.2
 cell 1 done 1 s after it started; the model is still downloading
-model ready 27 s after cell 1 started
-llama-server ready in 13.3 s, 40 s after cell 1 started
+model ready 26 s after cell 1 started
+llama-server ready in 23.2 s, 49 s after cell 1 started
 The sky appears blue because of a phenomenon called Rayleigh scattering, ...
-33 tokens in 17.9 s; the server decoded at 6.2 tokens/s
-notebook script total 58.576598347 s
+33 tokens in 0.4 s; the server decoded at 103.2 tokens/s
 ```
 
-The 6.2 tokens per second includes the first compile. A Colab v5e-1 runtime ran `libtpu` 0.0.50 on 2026-11-17, so the release binaries were also run with that version's wheel:
+The first request runs at full speed because the server compiled its one program before it reported ready.
 
-```text
-libtpu-0.0.50-cp313-cp313-manylinux_2_31_x86_64.whl
-up in 15.234242224 s
-request 1 21.325293300 s
-'The sky appears blue because of a phenomenon called Rayleigh scattering, where shorter blu' 33 tok 106.2 tok/s
-request 2 .393993403 s
-```
+The chat page is built for a room of first-time users. It has one switch, Thinking, and replies stop at 2,048 tokens. Its local proxy passes only chat requests and the model list to `llama-server`, and rebuilds each chat request from the user and assistant text. A conversation longer than the context minus one reply loses its oldest turns, counted with the server's own template and tokenizer, and the page says how many. `llama-server`'s own web UI is off.
 
 ---
 
@@ -319,18 +321,19 @@ Keep the host CPU for machines without an accelerator. On this VM it decodes at 
 
 #### Summary
 
-The goal of this article was to run an unmodified llama.cpp on a Cloud TPU. The key to the solution was lowering each ggml graph to one StableHLO program, compiling it with XLA, and running it through `libtpu`'s PJRT C API with the weights and KV cache on the chip. The TPU v5e-1 results were:
+The goal of this article was to run llama.cpp on a Cloud TPU. The key to the solution was lowering each ggml graph to one StableHLO program, compiling it with XLA, and running it through `libtpu`'s PJRT C API with the weights and KV cache on the chip. The TPU v5e-1 results were:
 
 - 🟢 122.56 tokens per second decode, 7641.86 tokens per second prompt
 - 🟢 129.42 to 151.67 tokens per second with the exact Q4_0 QAT drafter
 - 🟢 Every operation tested matches the CPU on the TPU, SUM 7/8 aside
 - 🟢 Partial offload works at `-ngl 10`, `-ngl 25` and `-ngl 99`
-- 🟢 Prebuilt release, ready 13.3 s after launch; runs with `libtpu` 0.0.17 and 0.0.50
-- ⚠️ Each new prompt length and every 256 tokens of context compile once, a few seconds each
+- 🟢 Prebuilt release on a hosted Colab v5e-1: chatting 49 s after the first cell, with `libtpu` 0.0.50
+- 🟢 One compiled program per server with `LLAMA_KV_FULL=1` and `-ub 1`: chat turns of 0.2 to 9.6 s
+- ⚠️ `-ub 1` reads prompts at 325.3 to 499.0 tokens per second, against 7641.86 in batches
 - ⚠️ The default bf16 weight format rounds Q4_0 weights; `GGML_TPU_QUANT=int8` keeps them exact
 - ❌ Flash attention, mixture-of-experts operations and quantized types other than Q4_0 and Q8_0 run on the CPU
 
-Scope: one Cloud TPU v5e-1 (flex-start, us-west4-a), 2026-11-19, `jax` 0.6.2 and `libtpu` 0.0.17 unless stated, llama.cpp `7182ef71e`, Gemma 4 E2B as the exact Q4_0 GGUF, one request at a time, `GGML_TPU_PRECISION=DEFAULT`, `llama-bench` with 3 repetitions. The CPU figures were taken on the same VM while `llama-server` sat idle on the TPU. The notebook's code cells were run as a script on the TPU VM; the notebook itself has not yet been run on a hosted Colab runtime.
+Scope: one Cloud TPU v5e-1 (flex-start, us-west4-a), 2026-11-19, `jax` 0.6.2 and `libtpu` 0.0.17 unless stated, llama.cpp `7182ef71e`, Gemma 4 E2B as the exact Q4_0 GGUF, one request at a time, `GGML_TPU_PRECISION=DEFAULT`, `llama-bench` with 3 repetitions. The CPU figures were taken on the same VM while `llama-server` sat idle on the TPU. The `LLAMA_KV_FULL` comparison and the notebook ran on a hosted Colab v5e-1 on 2026-11-22 with `libtpu` 0.0.50.
 
 The strategy for running llama.cpp on a Cloud TPU was validated with an incremental step by step approach.
 
@@ -339,7 +342,7 @@ The strategy for running llama.cpp on a Cloud TPU was validated with an incremen
 #### References
 
 - Repository: https://github.com/xbill9/ggml-tpu
-- Release v0.1.0: https://github.com/xbill9/ggml-tpu/releases/tag/v0.1.0
+- Release v0.2.0: https://github.com/xbill9/ggml-tpu/releases/tag/v0.2.0
 - Colab notebook: https://github.com/xbill9/colab/blob/main/notebooks/llamacpp_tpu_gemma4_e2b_v5e1.ipynb
 - Model: https://huggingface.co/xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf
 - Drafter: https://huggingface.co/xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf

@@ -1,0 +1,56 @@
+# llama.cpp chat stall: one KV window size and one-token batches
+
+Colab v5e-1, 2026-11-22. Build `ggml-tpu-98107ca-llama.cpp-7182ef71e-linux-x86_64.tar.gz`
+(SHA-256 ad4e6159cc12d942ee2c7d157edbc47ea5c6e9e0a5692a51aecc298dc676dc27), built on that VM with
+`scripts/build-release.sh` (llama.cpp 7182ef71e + `llama.cpp-kv-full.patch`). Model
+`gemma-4-E2B-it-q4_0-exact.gguf` rev 74b2c92c. `-c 8192 -fa off --parallel 1`, `GGML_TPU_PRECISION=DEFAULT`.
+Eight chat turns, history resent each turn, max_tokens 2048, temperature 0.7 (turn 5 with thinking on).
+Same binary for both runs; script: serve_test.py in the session scratchpad, copied here.
+
+A: no LLAMA_KV_FULL, default ubatch (512)
+[A] server ready 20.7 s
+[A] warm request 22.7 s
+[A] turn 1: prompt 19 tok (new 18), out 20 tok, 6.4 s, decode 108.6 tok/s
+[A] turn 2: prompt 60 tok (new 46), out 51 tok, 12.9 s, decode 108.9 tok/s
+[A] turn 3: prompt 133 tok (new 78), out 146 tok, 21.0 s, decode 21.5 tok/s
+[A] turn 4: prompt 300 tok (new 172), out 566 tok, 42.2 s, decode 35.2 tok/s
+[A] turn 5: prompt 894 tok (new 893), out 781 tok, 73.5 s, decode 32.6 tok/s
+[A] turn 6: prompt 1245 tok (new 380), out 166 tok, 32.2 s, decode 106.7 tok/s
+[A] turn 7: prompt 1435 tok (new 25), out 336 tok, 25.7 s, decode 105.5 tok/s
+[A] turn 8: prompt 1791 tok (new 21), out 126 tok, 28.5 s, decode 19.1 tok/s
+
+B: LLAMA_KV_FULL=1, -ub 1
+[B] server ready 22.2 s
+[B] warm request 0.1 s
+[B] turn 1: prompt 19 tok (new 18), out 17 tok, 0.2 s, prefill 334.4 tok/s, decode 104.2 tok/s
+[B] turn 2: prompt 57 tok (new 43), out 62 tok, 0.7 s, prefill 365.3 tok/s, decode 104.3 tok/s
+[B] turn 3: prompt 141 tok (new 89), out 137 tok, 1.5 s, prefill 428.7 tok/s, decode 105.8 tok/s
+[B] turn 4: prompt 299 tok (new 163), out 699 tok, 6.9 s, prefill 453.4 tok/s, decode 106.3 tok/s
+[B] turn 5: prompt 1026 tok (new 1025), out 811 tok, 9.6 s, prefill 499.0 tok/s, decode 107.3 tok/s
+[B] turn 6: prompt 1301 tok (new 304), out 184 tok, 2.4 s, prefill 481.2 tok/s, decode 108.5 tok/s
+[B] turn 7: prompt 1509 tok (new 25), out 374 tok, 3.6 s, prefill 339.5 tok/s, decode 106.3 tok/s
+[B] turn 8: prompt 1903 tok (new 21), out 100 tok, 1.0 s, prefill 325.3 tok/s, decode 106.9 tok/s
+
+The ggml-tpu compile lines (GGML_TPU_VERBOSE=1) did not reach llama-server's log, so the script's
+compile counts read 0 in both runs; the turn times and decode rates above are the evidence.
+
+The tested build above was rebuilt from the same commit for the release (the archive records the build
+time, so the bytes differ): ggml-tpu v0.2.0, SHA-256 76c9a4248c6e7ec933915c68e1f4a0e3bdeb5bd43cbb37a8820fdd34801489fb.
+That file ran in the notebook on a fresh Colab v5e-1 (runs/2026-11-22/llamacpp_tpu_gemma4_e2b_v5e1_output.ipynb):
+llama-server ready 48 s after cell 1 started; the first request, 33 tokens in 0.4 s at 107.6 tok/s.
+
+Notebook on a hosted Colab v5e-1, 2026-11-22, release v0.2.0 and the locked-down chat page (ggml-tpu 240b905),
+cell outputs verbatim:
+ggml-tpu 98107ca6ebd6a13713d81c800bee12dca0a9f2c0
+llama.cpp 7182ef71e6d5dd0c8ea76486fac134fcd25025d4 + llama.cpp-kv-full.patch
+libtpu  0.0.50
+jax     0.11.2
+cell 1 done 1 s after it started; the model is still downloading
+model ready 26 s after cell 1 started
+llama-server ready in 23.2 s, 49 s after cell 1 started
+33 tokens in 0.4 s; the server decoded at 103.2 tokens/s
+
+Chat page lock-down, CPU llama-server -c 4096 on the workstation (2026-11-22): 13 messages sent, 8 oldest
+dropped, 1644 prompt tokens; refused: other routes (404), system role, non-JSON, empty messages (400),
+>1 MB body (413), a 3008-token message ("that message is 3008 tokens; this chat takes up to 2048");
+max_tokens 5 asked, 110 tokens returned (the page fixes 2048).
