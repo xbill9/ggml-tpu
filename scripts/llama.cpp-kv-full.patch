@@ -1,0 +1,27 @@
+--- a/src/llama-kv-cache.cpp	2026-11-22 08:34:55.775950659 -0500
++++ b/src/llama-kv-cache.cpp	2026-11-22 08:35:04.911848669 -0500
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <cassert>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
+ #include <map>
+@@ -1286,6 +1287,16 @@
+     // note: this also helps some backends with performance (f.ex https://github.com/ggml-org/llama.cpp/pull/16812#issuecomment-3455112220)
+     const uint32_t n_pad_cur = std::max(n_pad, 256u);
+ 
++    // ggml-tpu: LLAMA_KV_FULL=1 keeps n_kv at the whole cache, so every graph has one shape and a
++    // backend that compiles per shape compiles once instead of once per 256 cells
++    static const bool kv_full = [] { const char * v = getenv("LLAMA_KV_FULL"); return v && v[0] == '1'; }();
++    if (kv_full) {
++        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
++            result = std::max(v_cells[sinfo.strm[s]].size(), result);
++        }
++        return result;
++    }
++
+     for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+         const auto & cells = v_cells[sinfo.strm[s]];
+ 
