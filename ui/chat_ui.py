@@ -7,6 +7,13 @@ answering) and /ui/info (what is running, from llama-server's /props, /v1/models
 plus --rig KEY=VALUE pairs naming the TPU). The server's own per-reply timings, which llama-server
 adds to the last streamed chunk, are shown beside the browser-measured ones.
 
+Locked down for workshops: only GET /v1/models and POST /v1/chat/completions reach the server, and
+every chat request is rebuilt here. It keeps user and assistant text and the thinking switch, fixes
+replies at 2,048 tokens and uses the server's sampling defaults. A conversation longer than the
+context minus the reply loses its oldest turns, counted with the server's own template and tokenizer,
+down to half the context so the server's prompt cache is rebuilt rarely; the stream's first event
+says how many messages were left out. A single message too long to fit is refused.
+
 Normally started by scripts/chat.sh, which first opens an SSH tunnel to the TPU VM.
 
 Adapted from ui/chat_ui.py in github.com/xbill9/colab (commit 3525526).
@@ -96,6 +103,7 @@ PAGE = r"""<!doctype html>
   input[type=range] { width: 100%; }
   aside textarea { width: 100%; min-height: 70px; font-size: 13px; }
   .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .notice { max-width: 820px; width: 100%; margin: 0 auto; text-align: center; color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -111,17 +119,17 @@ PAGE = r"""<!doctype html>
     <div id="log">
       <div class="empty" id="empty">
         <h2>Ask Gemma on the TPU</h2>
-        <div>Replies stream from llama-server on a Cloud TPU (ggml-tpu backend, device TPU0), through an SSH tunnel and a local proxy.</div>
+        <div>Replies stream from llama-server on a TPU (ggml-tpu backend, device TPU0).</div>
         <div class="chips" id="chips"></div>
       </div>
     </div>
     <form id="form">
       <div class="row">
-        <textarea id="input" rows="1" placeholder="Message Gemma…  (Enter to send, Shift+Enter for a new line)"></textarea>
+        <textarea id="input" rows="1" maxlength="40000" placeholder="Message Gemma…  (Enter to send, Shift+Enter for a new line)"></textarea>
         <button type="button" class="ghost" id="clear" title="Start a new conversation">New</button>
         <button type="submit" class="primary" id="send">Send</button>
       </div>
-      <div class="hint">The conversation is sent with each message · Stop cancels the request on the server</div>
+      <div class="hint">Long chats keep the most recent messages · Stop cancels the reply · New starts over</div>
     </form>
   </main>
   <aside>
@@ -134,7 +142,7 @@ PAGE = r"""<!doctype html>
     <dl id="engine"><dt>—</dt><dd>loading…</dd></dl>
     <h3>Server load</h3>
     <dl id="load"><dt>—</dt><dd>loading…</dd></dl>
-    <div class="note">"First token" and "decode" are measured in this browser, so they include the network to the TPU. "server prompt" and "server decode" are llama-server's own timings. The first reply at a new prompt length includes an XLA compile.</div>
+    <div class="note">"First token" and "decode" are measured in this browser, so they include the network to the TPU. "server prompt" and "server decode" are llama-server's own timings.</div>
   </aside>
 </div>
 <script>
@@ -195,6 +203,11 @@ function addMsg(role, text) {
   else bubble.innerHTML = `<details class="think" hidden><summary>Reasoning</summary><div></div></details><div class="answer"></div>`;
   log.appendChild(m); log.scrollTop = log.scrollHeight;
   return m;
+}
+
+function notice(text) {
+  const n = document.createElement("div"); n.className = "notice"; n.textContent = text;
+  log.insertBefore(n, log.lastElementChild); return n;
 }
 
 function setDL(id, rows) {
@@ -259,7 +272,11 @@ async function submit() {
       method: "POST", headers: { "content-type": "application/json" }, signal: controller.signal,
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    if (!r.ok) {
+      const t = await r.text(); let m = t.slice(0, 300);
+      try { const j = JSON.parse(t); m = (j.error && j.error.message) || m; } catch {}
+      throw new Error(m);
+    }
     const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
     while (true) {
       const { value, done } = await reader.read(); if (done) break;
@@ -270,6 +287,11 @@ async function submit() {
         if (!line.startsWith("data:")) continue;
         const data = line.slice(5).trim(); if (data === "[DONE]") continue;
         const j = JSON.parse(data);
+        if (j.x_dropped_messages) {
+          history.splice(0, j.x_dropped_messages);
+          notice(`The chat grew past what Gemma can read at once, so the ${j.x_dropped_messages} oldest messages were left out.`);
+          continue;
+        }
         if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
         if (j.usage) usage = j.usage;
         if (j.timings) timings = j.timings;
@@ -324,6 +346,39 @@ input.focus();
 
 
 
+REPLY_TOKENS = 2048  # every reply stops here; the page says so
+MAX_BODY = 1 << 20   # bytes; a request body larger than this is refused
+
+
+class Refused(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def clean_chat(req):
+    """The only chat request that reaches the server: text turns, the thinking switch, fixed limits."""
+    msgs = req.get("messages") if isinstance(req, dict) else None
+    if not isinstance(msgs, list) or not msgs:
+        raise Refused(400, "send at least one message")
+    out = []
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("role") not in ("user", "assistant") or not isinstance(m.get("content"), str):
+            raise Refused(400, "each message needs the role user or assistant and text content")
+        out.append({"role": m["role"], "content": m["content"]})
+    if out[-1]["role"] != "user":
+        raise Refused(400, "the last message must be from the user")
+    kwargs = req.get("chat_template_kwargs")
+    think = bool(kwargs.get("enable_thinking", False)) if isinstance(kwargs, dict) else False
+    body = {"messages": out, "stream": req.get("stream") is not False, "max_tokens": REPLY_TOKENS,
+            "chat_template_kwargs": {"enable_thinking": think}}
+    if isinstance(req.get("model"), str):
+        body["model"] = req["model"]
+    if body["stream"]:
+        body["stream_options"] = {"include_usage": True}
+    return body
+
+
 METRIC = re.compile(r"^([a-zA-Z_:][\w:]*)(?:\{(.*)\})?\s+(\S+)")
 LABEL = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
 
@@ -354,6 +409,7 @@ def metric_sum(metrics, *names):
 class Handler(http.server.BaseHTTPRequestHandler):
     upstream = ""
     rig = {}
+    n_ctx = None  # read once from the server's /props
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
@@ -362,17 +418,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json({"upstream": self.upstream, "health": self._get(self.upstream + "/health", 5)[0]})
         elif self.path == "/ui/info":
             self._json(self._info())
-        elif self.path.startswith("/v1/"):
+        elif self.path == "/v1/models":
             self._forward(None)
         else:
             self.send_error(404)
 
     def do_POST(self):
-        if not self.path.startswith("/v1/"):
+        if self.path != "/v1/chat/completions":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
-        self._forward(self.rfile.read(length))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length > MAX_BODY:
+                raise Refused(413, "that message is too long for this chat")
+            try:
+                req = json.loads(self.rfile.read(length))
+            except ValueError:
+                raise Refused(400, "the request is not JSON") from None
+            body = clean_chat(req)
+            dropped = self._fit(body)
+        except Refused as e:
+            self._json({"error": {"message": str(e)}}, e.code)
+            return
+        except OSError as e:
+            self._json({"error": {"message": f"upstream {self.upstream} unreachable: {e}"}}, 502)
+            return
+        self._forward(json.dumps(body).encode(), dropped)
+
+    def _post_json(self, path, obj):
+        req = urllib.request.Request(self.upstream + path, json.dumps(obj).encode(), {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+
+    def _prompt_tokens(self, body):
+        prompt = self._post_json("/apply-template", {"messages": body["messages"],
+                                                     "chat_template_kwargs": body["chat_template_kwargs"]})["prompt"]
+        return len(self._post_json("/tokenize", {"content": prompt})["tokens"])
+
+    def _fit(self, body):
+        """Drop the oldest turns until the prompt leaves room for a full reply; returns how many."""
+        if Handler.n_ctx is None:
+            code, text = self._get(self.upstream + "/props")
+            n = (json.loads(text).get("default_generation_settings") or {}).get("n_ctx") if code == 200 else None
+            if not n:
+                raise Refused(502, "the server did not report its context size")
+            Handler.n_ctx = int(n)
+        budget = Handler.n_ctx - REPLY_TOKENS
+        msgs = body["messages"]
+        n = self._prompt_tokens(body)
+        if n <= budget:
+            return 0
+        dropped = 0
+        while len(msgs) > 1 and n > Handler.n_ctx // 2:
+            k = 2 if len(msgs) > 2 else 1  # one user turn and the reply to it; the last message always stays
+            del msgs[:k]
+            dropped += k
+            n = self._prompt_tokens(body)
+        if n > budget:
+            raise Refused(400, f"that message is {n} tokens; this chat takes up to {budget}")
+        return dropped
 
     def _get(self, url, timeout=10):
         try:
@@ -428,7 +532,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj).encode(), "application/json")
 
-    def _forward(self, body):
+    def _forward(self, body, dropped=0):
         req = urllib.request.Request(
             self.upstream + self.path,
             data=body,
@@ -448,8 +552,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # upstream connection, which makes the server stop generating.
         try:
             self.send_response(resp.status)
-            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+            ctype = resp.headers.get("Content-Type", "application/json")
+            self.send_header("Content-Type", ctype)
             self.end_headers()
+            if dropped and resp.status == 200 and ctype.startswith("text/event-stream"):
+                self.wfile.write(f"data: {json.dumps({'x_dropped_messages': dropped})}\n\n".encode())
             while chunk := resp.read1(65536):
                 self.wfile.write(chunk)
                 self.wfile.flush()
