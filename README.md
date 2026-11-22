@@ -16,7 +16,7 @@ llama.cpp hands each backend a graph of tensor operations. Every other ggml back
   - `int8`: exact. Two arrays per weight, int8 codes and one f32 scale per 32-weight block, both stored column-major (K before M), which is the layout the TPU's int8 matrix multiply wants; in row-major order XLA transposed every weight in every program. Every weight is rebuilt exactly as code × scale inside the matrix multiply. The weights stay exact at any precision; the activations are rounded to bf16 below `GGML_TPU_PRECISION=HIGHEST`.
   - `packed`: ggml's 18- or 34-byte blocks as they are, dequantized exactly inside every program. Exact, and slower than `int8`.
 - **The graph cache** is keyed by a fingerprint of the graph's tensors, so a graph llama.cpp reuses skips lowering; programs are also cached by their text.
-- **Recompiles** happen when the graph's shape changes: once for the prompt batch size and once for single-token decode, and again when llama.cpp's KV window grows (it pads to 256).
+- **Recompiles** happen when the graph's shape changes: once for the prompt batch size and once for single-token decode, and again when llama.cpp's KV window grows (it pads to 256). The release build patches llama.cpp (`scripts/llama.cpp-kv-full.patch`) so that `LLAMA_KV_FULL=1` keeps the window at the whole context; with `-ub 1` as well, every request runs one program. Colab v5e-1, 2026-11-22, eight chat turns at `-c 8192`: 0.2 to 9.6 s per turn and 104 to 108 tok/s decode with both, 6.4 to 73.5 s per turn without (same binary).
 
 #### Two executors
 
