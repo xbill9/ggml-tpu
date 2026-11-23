@@ -1,0 +1,13 @@
+This article provides a step by step guide to running llama.cpp on a Google Cloud TPU. An unofficial ggml backend, ggml-tpu, turns each llama.cpp graph into one XLA program and runs it on the chip through libtpu, so llama-server, llama-bench and every other llama.cpp tool use the TPU as device TPU0.
+
+https://github.com/xbill9/ggml-tpu
+
+Unofficial. ggml-tpu is an independent, out-of-tree project, separate from ggml-org/llama.cpp and from Google, which neither made nor endorses it. The backend builds against an unchanged llama.cpp; the prebuilt release adds one 11-line patch so that a chat never waits for a compile (see the Tip after Step 5).
+
+Dev.to is here: https://dev.to/gde/llamacpp-on-a-cloud-tpu-an-unofficial-ggml-backend-through-xla-5j8
+
+Medium is here: https://medium.com/@xbill999/llama-cpp-on-a-cloud-tpu-an-unofficial-ggml-backend-through-xla-ad4abc1243f4
+
+Substack is here: https://xbill9.substack.com/p/llamacpp-on-a-cloud-tpu-an-unofficial
+
+My LinkedIn post is here: https://www.linkedin.com/feed/update/urn:li:ugcPost:7530704626434686976/

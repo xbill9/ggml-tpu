@@ -1,0 +1,15 @@
+llama.cpp on a Cloud TPU: An Unofficial ggml Backend Through XLA
+
+ggml-tpu lowers each llama.cpp graph to one StableHLO program, compiles it with XLA and runs it on a TPU through libtpu. Gemma 4 E2B on one TPU v5e chip: build, test every operation, serve, chat, speculative decoding, and a three-cell Colab notebook.
+
+What is in it:
+
+- 🟢 122.56 tokens per second decode, 7641.86 tokens per second prompt
+- 🟢 129.42 to 151.67 tokens per second with the exact Q4_0 QAT drafter
+- 🟢 Every operation tested matches the CPU on the TPU, SUM 7/8 aside
+- 🟢 Partial offload works at -ngl 10, -ngl 25 and -ngl 99
+
+dev.to (Google Developer Experts): https://dev.to/gde/llamacpp-on-a-cloud-tpu-an-unofficial-ggml-backend-through-xla-5j8
+Medium: https://medium.com/@xbill999/llama-cpp-on-a-cloud-tpu-an-unofficial-ggml-backend-through-xla-ad4abc1243f4
+Substack: https://xbill9.substack.com/p/llamacpp-on-a-cloud-tpu-an-unofficial
+GitHub: https://github.com/xbill9/ggml-tpu
