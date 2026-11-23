@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc 3.11" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>llama.cpp on a Cloud TPU: An Unofficial ggml Backend Through XLA</title>
+  <meta name="description" content="ggml-tpu lowers each llama.cpp graph to one StableHLO program, compiles it with XLA and runs it on a TPU through libtpu. Gemma 4 E2B on one TPU v5e chip: build, test every operation, serve, chat, speculative decoding, and a three-cell Colab notebook." />
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      white-space: pre-wrap;
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #1a1a1a;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+  </style>
+  <style>
+    body{font-family:-apple-system,'Segoe UI',Roboto,'Liberation Sans',Arial,sans-serif;
+         font-size:18px;line-height:1.58;max-width:42em;color:#242424;}
+    h1,h2,h3,h4{font-weight:700;line-height:1.25;margin-top:1.8em;}
+    h4{font-size:1.25em;}
+    img{max-width:100%;height:auto;display:block;margin:1.6em 0;}
+    pre{background:#f7f7f7;border:1px solid #e6e6e6;border-radius:4px;
+        padding:12px 14px;overflow-x:auto;font-size:14px;line-height:1.45;}
+    code{font-family:'Liberation Mono',Menlo,Consolas,monospace;}
+    :not(pre)>code{background:#f2f2f2;padding:1px 5px;border-radius:3px;font-size:.9em;}
+    blockquote{border-left:3px solid #ddd;margin-left:0;padding-left:1em;color:#555;}
+    hr{border:0;border-top:1px solid #e6e6e6;margin:2.4em 0;}
+  </style>
+</head>
+<body>
+<p>This article provides a step by step guide to running llama.cpp on a
+Google Cloud TPU. An unofficial ggml backend, <code>ggml-tpu</code>,
+turns each llama.cpp graph into one XLA program and runs it on the chip
+through <code>libtpu</code>, so <code>llama-server</code>,
+<code>llama-bench</code> and every other llama.cpp tool use the TPU as
+device <code>TPU0</code>.</p>
+<figure><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-cover.71c7edf3.jpg" alt="llama.cpp on a Cloud TPU: An Unofficial ggml Backend Through XLA" /></figure>
+<p><a
+href="https://github.com/xbill9/ggml-tpu">https://github.com/xbill9/ggml-tpu</a></p>
+<p><strong>Unofficial.</strong> <code>ggml-tpu</code> is an independent,
+out-of-tree project, separate from ggml-org/llama.cpp and from Google,
+which neither made nor endorses it. The backend builds against an
+unchanged llama.cpp; the prebuilt release adds one 11-line patch so that
+a chat never waits for a compile (see the Tip after Step 5).</p>
+<p><strong>Gemma 4 E2B decodes at 122.56 tokens per second on one TPU
+v5e chip, and at 129.42 to 151.67 with Google's QAT drafter.</strong>
+One Cloud TPU v5e-1, 2026-11-19:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-1.png"
+alt="Table: Gemma 4 E2B, Q4_0, Prompt, 512 tokens, Decode, 128 tokens" /></p>
+<hr />
+<h4 id="what-is-ggml-tpu">What Is ggml-tpu?</h4>
+<p>llama.cpp hands each backend a graph of tensor operations. Every
+other ggml backend executes that graph one operation at a time with
+hand-written kernels. <code>ggml-tpu</code> turns the whole graph into
+one StableHLO program, compiles it with XLA, caches the compiled
+program, and runs it on tensors that stay on the device.</p>
+<p>It loads into a stock llama.cpp build as an out-of-tree backend,
+through <code>GGML_BACKEND_PATH</code>:</p>
+<pre class="bash"><code>export GGML_BACKEND_PATH=$HOME/ggml-tpu/build/libggml-tpu.so
+~/llama.cpp/build-tpu/bin/llama-completion -m model.gguf -dev TPU0 -ngl 99 -fa off \
+    -p &quot;The capital of France is&quot; -n 16 --temp 0 -no-cnv</code></pre>
+<p><code>-dev TPU0</code> is required: llama.cpp's command-line tools
+load out-of-tree backends only when a device option is parsed.
+<code>-fa off</code> is required too, because flash attention is one of
+the operations the backend leaves to the CPU.</p>
+<hr />
+<h4 id="how-does-a-llamacpp-graph-become-one-tpu-program">How Does a
+llama.cpp Graph Become One TPU Program?</h4>
+<p>Four rules decide the program:</p>
+<ul>
+<li><strong>Weights and the KV cache stay on the chip.</strong> A tensor
+is downloaded only when llama.cpp reads it back.</li>
+<li><strong>ggml views are memory views.</strong> Reshapes, permutes and
+KV-cache slices are offsets and strides into a parent tensor, lowered to
+reshape, slice and transpose where the strides allow, and to gather and
+scatter otherwise.</li>
+<li><strong>The program returns</strong> the graph's final nodes, the
+tensors llama.cpp flags as outputs, every tensor written in place, and
+the inputs of any operation the backend turns down, because llama.cpp's
+scheduler runs that operation on the CPU and reads its inputs
+afterwards.</li>
+<li><strong>Everything else stays inside the program,</strong> where XLA
+fuses it. Returning every intermediate halves the speed:</li>
+</ul>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-2.png"
+alt="Table: GGML_TPU_MATERIALIZE_ALL, Prompt, 512 tokens, Decode, 128 tokens" /></p>
+<p>The program reaches the chip through the PJRT C API: the backend
+loads <code>libtpu.so</code> with <code>dlopen</code>, calls its one
+exported function, <code>GetPjrtApi</code>, and compiles and runs
+programs through it. No Python or JAX runs at serving time.</p>
+<hr />
+<h4 id="at-this-point-you-should-have">At This Point You Should
+Have…</h4>
+<ul>
+<li>A Google Cloud project with TPU v5e quota, and <code>gcloud</code>
+signed in.</li>
+<li>A flex-start TPU v5e-1, or a Colab TPU runtime for Step 9.</li>
+<li>The model: <a
+href="https://huggingface.co/xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf"><code>xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf</code></a>,
+Gemma 4 E2B with Google's quantization-aware-trained 4-bit weights
+stored exactly as Q4_0. Public, no token.</li>
+</ul>
+<hr />
+<h4 id="step-1--get-a-tpu-v5e">Step 1 — Get a TPU v5e</h4>
+<p>v5e is reached through the queued-resources API. Flex-start queues
+the request and deletes the VM at <code>--max-run-duration</code>:</p>
+<pre class="bash"><code>gcloud alpha compute tpus queued-resources create ggml-tpu-burnin \
+  --zone=us-west4-a --project=&lt;project&gt; \
+  --runtime-version=v2-alpha-tpuv5-lite --node-id=ggml-tpu-burnin-node \
+  --accelerator-type=v5litepod-1 \
+  --provisioning-model=flex-start --max-run-duration=6h --valid-until-duration=2h
+Created queued_resource [ggml-tpu-burnin].
+16:19:20   (UTC, when the create returned)
+ACTIVE 16:21:54   (UTC, first poll that saw ACTIVE)</code></pre>
+<p>The VM has 24 vCPUs and 47 GB of RAM beside the chip.</p>
+<hr />
+<h4 id="step-2--build-or-download-the-release">Step 2 — Build, or
+Download the Release</h4>
+<p>One script installs <code>jax[tpu]</code> (which brings
+<code>libtpu</code>), builds llama.cpp at the pinned commit, and builds
+the backend:</p>
+<pre class="bash"><code>bash ~/ggml-tpu/scripts/setup-tpu-vm.sh
+setup rc=0 211s
+[100%] Built target ggml-tpu
+setup done
+jax 0.6.2 libtpu 0.0.17 [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]
+llama.cpp 7182ef71e</code></pre>
+<p>To skip the build, <a
+href="https://github.com/xbill9/ggml-tpu/releases/tag/v0.2.0">release
+v0.2.0</a> has <code>llama-server</code>, its libraries and
+<code>libggml-tpu.so</code> in one tarball, built with portable CPU code
+on a Colab TPU runtime. Every binary finds its libraries next to
+itself:</p>
+<pre class="bash"><code>tar xzf ggml-tpu-98107ca-llama.cpp-7182ef71e-linux-x86_64.tar.gz
+cd ggml-tpu-98107ca-llama.cpp-7182ef71e-linux-x86_64
+LLAMA_KV_FULL=1 GGML_BACKEND_PATH=$PWD/libggml-tpu.so GGML_TPU_LIBTPU=/path/to/libtpu.so \
+  ./llama-server -m model.gguf -dev TPU0 -ngl 99 -fa off -ub 1 -c 8192 --jinja</code></pre>
+<hr />
+<h4 id="step-3--check-every-operation-against-the-cpu">Step 3 — Check
+Every Operation Against the CPU</h4>
+<p>llama.cpp's <code>test-backend-ops</code> runs each operation on this
+backend and on the CPU backend and compares the results:</p>
+<pre class="bash"><code>~/llama.cpp/build-tpu/bin/test-backend-ops -b TPU0 -o MUL_MAT</code></pre>
+<p>On the TPU, through <code>libtpu</code>:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-3.png"
+alt="Table: Operations, Tests passed" /></p>
+<p>The one SUM case that differs sums thousands of random values whose
+total lands near zero, against a CPU that sums in double precision.</p>
+<hr />
+<h4 id="step-4--check-whole-graphs-the-way-llamacpp-runs-them">Step 4 —
+Check Whole Graphs the Way llama.cpp Runs Them</h4>
+<p>Single operations miss what happens between graphs: llama.cpp's
+scheduler splits a model between backends and copies tensors across.
+<code>tpu-regress</code> runs small graphs through that same scheduler,
+with the CPU as fallback, and compares them with the CPU alone:</p>
+<pre class="bash"><code>~/ggml-tpu/build/tpu-regress
+0 intermediate read by a CPU split   OK    max rel err 9.61e-08
+1 read after in-place write          OK    max rel err 0
+2 copy into an unwritten tensor      OK    max rel err 0.00021
+3 strided root copied from the CPU   OK    max rel err 0</code></pre>
+<p>Case 3 is the one partial offload depends on (Step 8): the scheduler
+hands the TPU a copy of a permuted KV-cache view that keeps the view's
+strides, and the backend keeps such a tensor on the chip as its raw
+memory span.</p>
+<hr />
+<h4 id="step-5--serve-gemma-4-e2b">Step 5 — Serve Gemma 4 E2B</h4>
+<p><code>scripts/serve.sh</code> downloads the model at a pinned
+revision, checks its SHA-256, and starts <code>llama-server</code> on
+<code>TPU0</code> with an OpenAI-compatible API on port 8090:</p>
+<pre class="bash"><code>bash ~/ggml-tpu/scripts/serve.sh
+download 27.100876905 s
+419db9a6bf3bc15d770c85ccf9216827aa88c64fe8f3d72fbe5674f48efe2dc8  /home/xbill/models/gemma-4-E2B-it-q4_0-exact.gguf
+restart: launch -&gt; /health 13.528799931 s
+first request: 18.154300936 s
+request 2: .112339159 s</code></pre>
+<p>The first request compiles the prompt and decode programs. The same
+request a second time takes 0.11 s.</p>
+<p>The logits match the CPU's: <code>tpu-compare</code> loads the model
+twice, once per backend, feeds both the same tokens, and compares every
+step:</p>
+<pre class="text"><code>argmax agreement 9/10, worst nmse 3.597e-02</code></pre>
+<p>That run uses the default weight format, which converts Q4_0 to bf16
+on upload for speed. <code>GGML_TPU_QUANT=int8</code> keeps every weight
+exact.</p>
+<hr />
+<h4 id="mag_right-tip-one-shape-one-compile">🔎 Tip: One Shape, One
+Compile</h4>
+<p>XLA compiles one program per graph shape. A chat produces new shapes
+in two ways: every new prompt length, and every 256 tokens of context,
+the step by which llama.cpp grows its attention window. The first reply
+that crosses one pays for a compile:</p>
+<pre class="text"><code>&quot;predicted_n&quot;:278, ... &quot;predicted_per_second&quot;:36.23702678465722</code></pre>
+<p>The same request twice more, compiled:</p>
+<pre class="text"><code>prompt 5 tok 25 ms; decode 348 tok 112.3 tok/s
+prompt 5 tok 25 ms; decode 281 tok 112.2 tok/s</code></pre>
+<p>Two settings remove both sources. <code>-ub 1</code> feeds prompts
+one token per step, so every step has the decode shape.
+<code>LLAMA_KV_FULL=1</code>, from the release's patch to llama.cpp (<a
+href="https://github.com/xbill9/ggml-tpu/blob/main/scripts/llama.cpp-kv-full.patch"><code>scripts/llama.cpp-kv-full.patch</code></a>),
+keeps the attention window at the whole context. The server then
+compiles its one program in its own start-up warm-up. The same binary on
+a Colab v5e-1, eight chat turns with the history resent each turn,
+<code>-c 8192</code>, 2026-11-22:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-4.png"
+alt="Table: Setting, Seconds per turn, Decode" /></p>
+<p>With <code>-ub 1</code> prompts read at 325.3 to 499.0 tokens per
+second, against 7641.86 for a 512-token batch. The longest prompt in
+those turns, 1,025 tokens, took 2054.25 ms.</p>
+<hr />
+<h4 id="step-6--chat-from-a-laptop">Step 6 — Chat From a Laptop</h4>
+<p><code>scripts/chat.sh</code> opens an SSH tunnel to the VM and serves
+a chat page on <code>http://localhost:8765</code>. The page shows each
+reply's speed as measured in the browser beside
+<code>llama-server</code>'s own figures, and turns Gemma's thinking on
+and off:</p>
+<pre class="bash"><code>TPU_PROJECT=&lt;project&gt; scripts/chat.sh
+&#39;The capital of France is Paris.&#39;
+server prompt 19 tok 32 ms; decode 8 tok 109.7 tok/s
+wall via tunnel .345320373 s</code></pre>
+<hr />
+<h4 id="step-7--speculative-decoding-with-the-qat-drafter">Step 7 —
+Speculative Decoding With the QAT Drafter</h4>
+<p>Google ships a small drafter model for Gemma 4 E2B QAT. Its exact
+Q4_0 GGUF, <a
+href="https://huggingface.co/xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf"><code>xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf</code></a>,
+runs on <code>TPU0</code> beside the target:</p>
+<pre class="bash"><code>DRAFT=1 bash ~/ggml-tpu/scripts/serve.sh</code></pre>
+<p>Three prompts, 256 tokens, temperature 0, each measured on its second
+request:</p>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-5.png"
+alt="Table: Prompt, Without drafter, With drafter, Speed-up, Drafted tokens accepted" /></p>
+<p>Each reply starts with the same text with and without the drafter.
+Loading it adds about five seconds to start-up: <code>/health</code>
+answered after 18.467643207 s against 13.768881281 s.</p>
+<hr />
+<h4 id="step-8--partial-offload">Step 8 — Partial Offload</h4>
+<p>With <code>-ngl</code> below the layer count, llama.cpp keeps some
+layers and their KV cache on the CPU and passes tensors between the two
+backends on every step:</p>
+<pre class="text"><code>== -ngl 10: The capital of France is Paris. [end of text]
+== -ngl 25: The capital of France is Paris. [end of text]
+== -ngl 99: The capital of France is Paris. [end of text]</code></pre>
+<hr />
+<h4 id="step-9--run-it-from-a-colab-notebook">Step 9 — Run It From a
+Colab Notebook</h4>
+<p><a
+href="https://colab.research.google.com/github/xbill9/colab/blob/main/notebooks/llamacpp_tpu_gemma4_e2b_v5e1.ipynb"><code>llamacpp_tpu_gemma4_e2b_v5e1</code></a>
+does Steps 2, 5 and 6 in three cells on a Colab v5e-1 runtime:</p>
+<ol type="1">
+<li><strong>Download</strong> the release tarball, check its SHA-256,
+and start the model download in the background.</li>
+<li><strong>Serve:</strong> start <code>llama-server</code> on
+<code>TPU0</code> with the runtime's own <code>libtpu</code>,
+<code>LLAMA_KV_FULL=1</code> and <code>-ub 1</code>, then the chat page
+in the notebook.</li>
+<li><strong>Use it:</strong> one request through the OpenAI-compatible
+endpoint.</li>
+</ol>
+<p>The notebook never imports JAX: only one process can hold the TPU,
+and it has to be <code>llama-server</code>. On a hosted Colab v5e-1,
+2026-11-22:</p>
+<pre class="text"><code>libtpu  0.0.50
+jax     0.11.2
+cell 1 done 1 s after it started; the model is still downloading
+model ready 26 s after cell 1 started
+llama-server ready in 23.2 s, 49 s after cell 1 started
+The sky appears blue because of a phenomenon called Rayleigh scattering, ...
+33 tokens in 0.4 s; the server decoded at 103.2 tokens/s</code></pre>
+<p>The first request runs at full speed because the server compiled its
+one program before it reported ready.</p>
+<p>The chat page is built for a room of first-time users. It has one
+switch, Thinking, and replies stop at 2,048 tokens. Its local proxy
+passes only chat requests and the model list to
+<code>llama-server</code>, and rebuilds each chat request from the user
+and assistant text. A conversation longer than the context minus one
+reply loses its oldest turns, counted with the server's own template and
+tokenizer, and the page says how many. <code>llama-server</code>'s own
+web UI is off.</p>
+<hr />
+<h4 id="step-10--tear-down">Step 10 — Tear Down</h4>
+<p>Flex-start bills until the VM is deleted:</p>
+<pre class="bash"><code>gcloud alpha compute tpus queued-resources delete ggml-tpu-burnin \
+  --zone=us-west4-a --project=&lt;project&gt; --force</code></pre>
+<hr />
+<h4 id="compare-and-contrast">Compare and Contrast</h4>
+<p><img src="https://raw.githubusercontent.com/xbill9/ggml-tpu/main/articles/llamacpp-tpu/medium/img/devto-llamacpp-tpu-table-6.png"
+alt="Table: Gemma 4 E2B Q4_0, one Cloud TPU v5e-1 VM, Prompt, 512 tokens, Decode, Ready after launch" /></p>
+<p>The drafter row is measured through <code>llama-server</code>'s chat
+endpoint, the other two with <code>llama-bench</code>.</p>
+<hr />
+<h4 id="so-which-one">So, Which One?</h4>
+<p>For llama.cpp users with a TPU, serve with <code>ggml-tpu</code> and
+the QAT drafter: the same <code>llama-server</code>, the same GGUF and
+the same OpenAI-compatible API, at 129.42 to 151.67 tokens per
+second.</p>
+<p>For a quick demo, open the Colab notebook: three cells, prebuilt
+binaries, nothing to compile in C++.</p>
+<p>Keep the host CPU for machines without an accelerator. On this VM it
+decodes at 38.35 tokens per second.</p>
+<hr />
+<h4 id="summary">Summary</h4>
+<p>The goal of this article was to run llama.cpp on a Cloud TPU. The key
+to the solution was lowering each ggml graph to one StableHLO program,
+compiling it with XLA, and running it through <code>libtpu</code>'s PJRT
+C API with the weights and KV cache on the chip. The TPU v5e-1 results
+were:</p>
+<ul>
+<li>🟢 122.56 tokens per second decode, 7641.86 tokens per second
+prompt</li>
+<li>🟢 129.42 to 151.67 tokens per second with the exact Q4_0 QAT
+drafter</li>
+<li>🟢 Every operation tested matches the CPU on the TPU, SUM 7/8
+aside</li>
+<li>🟢 Partial offload works at <code>-ngl 10</code>,
+<code>-ngl 25</code> and <code>-ngl 99</code></li>
+<li>🟢 Prebuilt release on a hosted Colab v5e-1: chatting 49 s after the
+first cell, with <code>libtpu</code> 0.0.50</li>
+<li>🟢 One compiled program per server with <code>LLAMA_KV_FULL=1</code>
+and <code>-ub 1</code>: chat turns of 0.2 to 9.6 s</li>
+<li>⚠️ <code>-ub 1</code> reads prompts at 325.3 to 499.0 tokens per
+second, against 7641.86 in batches</li>
+<li>⚠️ The default bf16 weight format rounds Q4_0 weights;
+<code>GGML_TPU_QUANT=int8</code> keeps them exact</li>
+<li>❌ Flash attention, mixture-of-experts operations and quantized
+types other than Q4_0 and Q8_0 run on the CPU</li>
+</ul>
+<p>Scope: one Cloud TPU v5e-1 (flex-start, us-west4-a), 2026-11-19,
+<code>jax</code> 0.6.2 and <code>libtpu</code> 0.0.17 unless stated,
+llama.cpp <code>7182ef71e</code>, Gemma 4 E2B as the exact Q4_0 GGUF,
+one request at a time, <code>GGML_TPU_PRECISION=DEFAULT</code>,
+<code>llama-bench</code> with 3 repetitions. The CPU figures were taken
+on the same VM while <code>llama-server</code> sat idle on the TPU. The
+<code>LLAMA_KV_FULL</code> comparison and the notebook ran on a hosted
+Colab v5e-1 on 2026-11-22 with <code>libtpu</code> 0.0.50.</p>
+<p>The strategy for running llama.cpp on a Cloud TPU was validated with
+an incremental step by step approach.</p>
+<hr />
+<h4 id="references">References</h4>
+<ul>
+<li>Repository: <a
+href="https://github.com/xbill9/ggml-tpu">https://github.com/xbill9/ggml-tpu</a></li>
+<li>Release v0.2.0: <a
+href="https://github.com/xbill9/ggml-tpu/releases/tag/v0.2.0">https://github.com/xbill9/ggml-tpu/releases/tag/v0.2.0</a></li>
+<li>Colab notebook: <a
+href="https://github.com/xbill9/colab/blob/main/notebooks/llamacpp_tpu_gemma4_e2b_v5e1.ipynb">https://github.com/xbill9/colab/blob/main/notebooks/llamacpp_tpu_gemma4_e2b_v5e1.ipynb</a></li>
+<li>Model: <a
+href="https://huggingface.co/xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf">https://huggingface.co/xbill9/gemma-4-E2B-it-qat-q4_0-exact-gguf</a></li>
+<li>Drafter: <a
+href="https://huggingface.co/xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf">https://huggingface.co/xbill9/gemma-4-E2B-it-qat-assistant-q4_0-exact-gguf</a></li>
+<li>llama.cpp: <a
+href="https://github.com/ggml-org/llama.cpp">https://github.com/ggml-org/llama.cpp</a></li>
+<li>PJRT C API: <a
+href="https://github.com/openxla/xla/blob/main/xla/pjrt/c/pjrt_c_api.h">https://github.com/openxla/xla/blob/main/xla/pjrt/c/pjrt_c_api.h</a></li>
+</ul>
+</body>
+</html>
