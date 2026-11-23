@@ -7,4 +7,4 @@ builder          = SKIP
 devto-aws        = SKIP
 repo             = https://github.com/xbill9/ggml-tpu
 linkedin-article = https://www.linkedin.com/pulse/llamacpp-cloud-tpu-unofficial-ggml-backend-through-xla-william-mclean-rupmc/
-linkedin         = https://www.linkedin.com/feed/update/urn:li:ugcPost:7530704626434686976/
+linkedin         = https://www.linkedin.com/feed/update/urn:li:activity:7530706653663633411/

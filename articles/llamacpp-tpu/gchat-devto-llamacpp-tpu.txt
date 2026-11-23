@@ -10,4 +10,4 @@ Medium is here: https://medium.com/@xbill999/llama-cpp-on-a-cloud-tpu-an-unoffic
 
 Substack is here: https://xbill9.substack.com/p/llamacpp-on-a-cloud-tpu-an-unofficial
 
-My LinkedIn post is here: https://www.linkedin.com/feed/update/urn:li:ugcPost:7530704626434686976/
+My LinkedIn post is here: https://www.linkedin.com/feed/update/urn:li:activity:7530706653663633411/
